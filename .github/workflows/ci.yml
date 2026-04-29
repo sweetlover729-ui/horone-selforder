@@ -51,6 +51,11 @@ jobs:
       env:
         DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_selforder
         FLASK_ENV: testing
+        PGUSER: postgres
+        PGPASSWORD: postgres
+        PGDATABASE: test_selforder
+        PGHOST: localhost
+        PGPORT: 5432
       run: |
         pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=60
     
