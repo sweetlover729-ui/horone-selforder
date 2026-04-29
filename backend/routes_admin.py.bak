@@ -1,0 +1,1753 @@
+# -*- coding: utf-8 -*-
+"""
+数据管理API路由（Admin使用）
+"""
+from flask import Blueprint, request, jsonify
+from datetime import datetime, date
+from decimal import Decimal
+import uuid
+import database
+import psycopg2
+from psycopg2 import sql
+
+admin_bp = Blueprint('admin', __name__)
+
+from auth import admin_required, validate_staff_token
+
+# ========== 产品类别 CRUD ==========
+
+@admin_required
+@admin_bp.route('/categories', methods=['GET'])
+def get_categories():
+    """获取产品类别列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, description, sort_order, is_active, created_at
+        FROM categories
+        ORDER BY sort_order, name
+    ''')
+    data = [dict(row) for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/categories', methods=['POST'])
+def create_category():
+    """创建产品类别"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    name = data.get('name', '').strip()
+    description = data.get('description', '').strip()
+    sort_order = data.get('sort_order', 0)
+
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO categories (name, description, sort_order)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        ''', (name, description, sort_order))
+        new_id = cursor.fetchone()['id']
+        conn.commit()
+        database.release_connection(conn)
+        return jsonify({'success': True, 'id': new_id})
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '类别名称已存在'})
+
+@admin_required
+@admin_bp.route('/categories/<int:category_id>', methods=['PUT'])
+def update_category(category_id):
+    """更新产品类别"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    set_clauses = []
+    params = []
+    for field in ['name', 'description', 'sort_order', 'is_active']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+
+    params.append(category_id)
+    query = sql.SQL('UPDATE categories SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/categories/<int:category_id>', methods=['DELETE'])
+def delete_category(category_id):
+    """删除产品类别"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    # 检查是否有关联的型号
+    cursor.execute('SELECT COUNT(*) as cnt FROM model_categories WHERE category_id = %s', (category_id,))
+    if cursor.fetchone()['cnt'] > 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '该类别下有关联型号，无法删除'})
+
+    cursor.execute('DELETE FROM categories WHERE id = %s', (category_id,))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True})
+
+# ========== 产品类型 CRUD ==========
+
+@admin_required
+@admin_bp.route('/product-types', methods=['GET'])
+def get_product_types():
+    """获取产品类型列表（级联过滤：可选 brand_id/service_type_id 约束）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    brand_id = request.args.get('brand_id', type=int) or None
+    service_type_id = request.args.get('service_type_id', type=int) or None
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    conditions = []
+    params = []
+    if brand_id:
+        conditions.append("pt.id IN (SELECT b.product_type_id FROM brands b JOIN order_items oi ON oi.brand_id = b.id WHERE oi.brand_id = %s)")
+        params.append(brand_id)
+    if service_type_id:
+        conditions.append("pt.id IN (SELECT DISTINCT b.product_type_id FROM order_items oi JOIN brands b ON oi.brand_id = b.id WHERE oi.service_type_id = %s)")
+        params.append(service_type_id)
+    if conditions:
+        where = "WHERE " + " AND ".join(conditions)
+        cursor.execute(sql.SQL('''
+            SELECT DISTINCT pt.id, pt.name, pt.categories, pt.sort_order
+            FROM product_types pt
+            {where_part}
+            ORDER BY pt.sort_order, pt.name
+        ''').format(where_part=sql.SQL(where)), params)
+    else:
+        cursor.execute('SELECT * FROM product_types ORDER BY sort_order, name')
+    data = [dict(row) for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/product-types', methods=['POST'])
+def create_product_type():
+    """创建产品类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    name = data.get('name', '')
+    category = data.get('category', '')
+    sort_order = data.get('sort_order', 0)
+    
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    categories = data.get('categories', '[]')
+    is_active = data.get('is_active', 1)
+    cursor.execute('''
+        INSERT INTO product_types (name, sort_order, categories, is_active) VALUES (%s, %s, %s, %s)
+        RETURNING id
+    ''', (name, sort_order, categories, is_active))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/product-types/<int:type_id>', methods=['PUT'])
+def update_product_type(type_id):
+    """更新产品类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    name = data.get('name', '')
+    sort_order = data.get('sort_order')
+    is_active = data.get('is_active')
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    if name:
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('name')))
+        params.append(name)
+    if sort_order is not None:
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('sort_order')))
+        params.append(sort_order)
+    if is_active is not None:
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('is_active')))
+        params.append(is_active)
+    
+    # 处理categories字段
+    categories = data.get('categories')
+    if categories:
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('categories')))
+        params.append(categories)
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    params.append(type_id)
+    query = sql.SQL('UPDATE product_types SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/product-types/<int:type_id>', methods=['DELETE'])
+def delete_product_type(type_id):
+    """删除产品类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM product_types WHERE id = %s', (type_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 品牌 CRUD ==========
+
+@admin_required
+@admin_bp.route('/brands', methods=['GET'])
+def get_brands():
+    """获取品牌列表（级联过滤：可选 product_type_id/service_type_id 约束）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    product_type_id = request.args.get('product_type_id', type=int) or None
+    service_type_id = request.args.get('service_type_id', type=int) or None
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    conditions = []
+    params = []
+    if product_type_id:
+        conditions.append("b.product_type_id = %s")
+        params.append(product_type_id)
+    if service_type_id:
+        conditions.append("b.id IN (SELECT DISTINCT oi.brand_id FROM order_items oi WHERE oi.service_type_id = %s)")
+        params.append(service_type_id)
+    if conditions:
+        where = "WHERE " + " AND ".join(conditions)
+        cursor.execute(sql.SQL('''
+            SELECT DISTINCT b.id, b.name, b.country, b.website, b.notes,
+                   pt.name as product_type_name, pt.id as product_type_id
+            FROM brands b
+            LEFT JOIN product_types pt ON b.product_type_id = pt.id
+            {where_part}
+            ORDER BY b.name
+        ''').format(where_part=sql.SQL(where)), params)
+    else:
+        cursor.execute('''
+            SELECT b.*, pt.name as product_type_name
+            FROM brands b
+            LEFT JOIN product_types pt ON b.product_type_id = pt.id
+            ORDER BY b.name
+        ''')
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/brands', methods=['POST'])
+def create_brand():
+    """创建品牌"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    product_type_id = data.get('product_type_id')
+    name = data.get('name', '')
+    country = data.get('country', '')
+    website = data.get('website', '')
+    notes = data.get('notes', '')
+    
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO brands (product_type_id, name, country, website, notes, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+    ''', (product_type_id, name, country, website, notes, 1))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/brands/<int:brand_id>', methods=['PUT'])
+def update_brand(brand_id):
+    """更新品牌"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    
+    for field in ['product_type_id', 'name', 'country', 'website', 'notes', 'is_active']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    params.append(brand_id)
+    query = sql.SQL('UPDATE brands SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/brands/<int:brand_id>', methods=['DELETE'])
+def delete_brand(brand_id):
+    """删除品牌"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM brands WHERE id = %s', (brand_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 型号 CRUD ==========
+
+@admin_required
+@admin_bp.route('/models', methods=['GET'])
+def get_models():
+    """获取型号列表（级联过滤：可选 brand_id/product_type_id 约束，返回关联的类别ID列表）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    brand_id = request.args.get('brand_id', type=int) or None
+    product_type_id = request.args.get('product_type_id', type=int) or None
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    conditions = []
+    params = []
+    if brand_id:
+        conditions.append("m.brand_id = %s")
+        params.append(brand_id)
+    if product_type_id:
+        conditions.append("b.product_type_id = %s")
+        params.append(product_type_id)
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    cursor.execute(sql.SQL('''
+        SELECT m.id, m.name, m.brand_id, m.serial_no, m.is_active,
+               b.name as brand_name, pt.name as product_type_name, pt.id as product_type_id,
+               ARRAY_AGG(DISTINCT mc.category_id) FILTER (WHERE mc.category_id IS NOT NULL) as category_ids,
+               ARRAY_AGG(DISTINCT c.name) FILTER (WHERE c.name IS NOT NULL) as categories
+        FROM models m
+        LEFT JOIN brands b ON m.brand_id = b.id
+        LEFT JOIN product_types pt ON b.product_type_id = pt.id
+        LEFT JOIN model_categories mc ON m.id = mc.model_id
+        LEFT JOIN categories c ON mc.category_id = c.id
+        {where_part}
+        GROUP BY m.id, m.name, m.brand_id, m.serial_no, m.is_active, b.name, pt.name, pt.id
+        ORDER BY m.name
+    ''').format(where_part=sql.SQL(where)), params)
+
+    rows = cursor.fetchall()
+    data = []
+    for row in rows:
+        d = dict(row)
+        # 清理 None 值
+        d['category_ids'] = [x for x in (d.get('category_ids') or []) if x is not None]
+        d['categories'] = [x for x in (d.get('categories') or []) if x is not None]
+        data.append(d)
+
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/models', methods=['POST'])
+def create_model():
+    """创建型号（支持多类型关联）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    brand_id = data.get('brand_id')
+    name = data.get('name', '').strip()
+    category_ids = data.get('category_ids', [])  # 多选类型ID列表
+    serial_no = data.get('serial_no', '')
+
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    try:
+        # 插入型号
+        cursor.execute('''
+            INSERT INTO models (brand_id, name, serial_no, is_active)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        ''', (brand_id, name, serial_no, 1))
+        new_id = cursor.fetchone()['id']
+
+        # 建立类型关联
+        for cat_id in category_ids:
+            cursor.execute('''
+                INSERT INTO model_categories (model_id, category_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+            ''', (new_id, cat_id))
+
+        conn.commit()
+        database.release_connection(conn)
+        return jsonify({'success': True, 'id': new_id})
+    except Exception as e:
+        conn.rollback()
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': str(e)})
+
+@admin_required
+@admin_bp.route('/models/<int:model_id>', methods=['PUT'])
+def update_model(model_id):
+    """更新型号（支持多类型关联更新）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    try:
+        # 更新型号基本信息
+        set_clauses = []
+        params = []
+
+        for field in ['brand_id', 'name', 'serial_no', 'is_active']:
+            if field in data:
+                set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+                params.append(data[field])
+
+        if set_clauses:
+            params.append(model_id)
+            query = sql.SQL('UPDATE models SET {} WHERE id = %s').format(
+                sql.SQL(', ').join(set_clauses)
+            )
+            cursor.execute(query, params)
+
+        # 更新类型关联（如果传了 category_ids）
+        if 'category_ids' in data:
+            # 删除旧关联
+            cursor.execute('DELETE FROM model_categories WHERE model_id = %s', (model_id,))
+            # 建立新关联
+            for cat_id in data['category_ids']:
+                cursor.execute('''
+                    INSERT INTO model_categories (model_id, category_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                ''', (model_id, cat_id))
+
+        conn.commit()
+        database.release_connection(conn)
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.rollback()
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': str(e)})
+
+@admin_required
+@admin_bp.route('/models/<int:model_id>', methods=['DELETE'])
+def delete_model(model_id):
+    """删除型号"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    # 先删除关联
+    cursor.execute('DELETE FROM model_categories WHERE model_id = %s', (model_id,))
+    cursor.execute('DELETE FROM models WHERE id = %s', (model_id,))
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True})
+
+# ========== 服务类型 CRUD ==========
+
+@admin_required
+@admin_bp.route('/service-types', methods=['GET'])
+def get_service_types():
+    """获取服务类型列表（级联过滤：可选 product_type_id/brand_id 约束）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    product_type_id = request.args.get('product_type_id', type=int) or None
+    brand_id = request.args.get('brand_id', type=int) or None
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    conditions = []
+    params = []
+    if product_type_id:
+        conditions.append("oi.product_type_id = %s")
+        params.append(product_type_id)
+    if brand_id:
+        conditions.append("oi.brand_id = %s")
+        params.append(brand_id)
+    if conditions:
+        where = "WHERE " + " AND ".join(conditions)
+        cursor.execute(sql.SQL('''
+            SELECT DISTINCT st.id, st.name, st.description, st.base_price,
+                   st.sort_order, st.category, st.category_id, st.product_type_id,
+                   pt.name as product_type_name
+            FROM order_items oi
+            JOIN service_types st ON oi.service_type_id = st.id
+            LEFT JOIN product_types pt ON st.product_type_id = pt.id
+            {where_part}
+            ORDER BY st.sort_order, st.name
+        ''').format(where_part=sql.SQL(where)), params)
+    else:
+        cursor.execute('''
+            SELECT st.*, st.category_id, pt.name as product_type_name
+            FROM service_types st
+            LEFT JOIN product_types pt ON st.product_type_id = pt.id
+            ORDER BY st.sort_order
+        ''')
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/service-types', methods=['POST'])
+def create_service_type():
+    """创建服务类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    product_type_id = data.get('product_type_id')
+    name = data.get('name', '')
+    description = data.get('description', '')
+    base_price = data.get('base_price', 0)
+    sort_order = data.get('sort_order', 0)
+    
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    category_id = data.get('category_id') or None
+    
+    cursor.execute('''
+        INSERT INTO service_types (product_type_id, name, description, base_price, sort_order, is_active, category_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    ''', (product_type_id, name, description, base_price, sort_order, 1, category_id))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/service-types/<int:service_type_id>', methods=['PUT'])
+def update_service_type(service_type_id):
+    """更新服务类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    
+    for field in ['product_type_id', 'name', 'description', 'base_price', 'sort_order', 'is_active', 'category_id']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    params.append(service_type_id)
+    query = sql.SQL('UPDATE service_types SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/service-types/<int:service_type_id>', methods=['DELETE'])
+def delete_service_type(service_type_id):
+    """删除服务类型"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM service_types WHERE id = %s', (service_type_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 服务项目 CRUD ==========
+
+@admin_required
+@admin_bp.route('/service-items', methods=['GET'])
+def get_service_items():
+    """获取服务项目列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    type_id = request.args.get('type_id', type=int)
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    if type_id:
+        cursor.execute('''
+            SELECT si.*, pt.name as product_type_name 
+            FROM service_items si
+            LEFT JOIN product_types pt ON si.product_type_id = pt.id
+            WHERE si.product_type_id = %s ORDER BY si.sort_order
+        ''', (type_id,))
+    else:
+        cursor.execute('''
+            SELECT si.*, pt.name as product_type_name 
+            FROM service_items si
+            LEFT JOIN product_types pt ON si.product_type_id = pt.id
+            ORDER BY si.sort_order
+        ''')
+    
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/service-items', methods=['POST'])
+def create_service_item():
+    """创建服务项目"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    product_type_id = data.get('product_type_id')
+    name = data.get('name', '')
+    description = data.get('description', '')
+    is_required = data.get('is_required', 1)
+    sort_order = data.get('sort_order', 0)
+    
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO service_items (product_type_id, name, description, is_required, sort_order, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+    ''', (product_type_id, name, description, is_required, sort_order, 1))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/service-items/<int:item_id>', methods=['PUT'])
+def update_service_item(item_id):
+    """更新服务项目"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    
+    for field in ['product_type_id', 'name', 'description', 'is_required', 'sort_order', 'is_active']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    params.append(item_id)
+    query = sql.SQL('UPDATE service_items SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/service-items/<int:item_id>', methods=['DELETE'])
+def delete_service_item(item_id):
+    """删除服务项目"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM service_items WHERE id = %s', (item_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 专项服务 CRUD ==========
+
+@admin_required
+@admin_bp.route('/special-services', methods=['GET'])
+def get_special_services():
+    """获取专项服务预设列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM special_services ORDER BY name')
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/special-services', methods=['POST'])
+def create_special_service():
+    """创建专项服务预设"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    name = data.get('name', '')
+    description = data.get('description', '')
+    preset_price = data.get('preset_price', 0)
+    
+    if not name:
+        return jsonify({'success': False, 'message': '名称不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO special_services (name, description, preset_price)
+        VALUES (%s, %s, %s)
+        RETURNING id
+    ''', (name, description, preset_price))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/special-services/<int:service_id>', methods=['PUT'])
+def update_special_service(service_id):
+    """更新专项服务预设"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    
+    for field in ['name', 'description', 'preset_price', 'is_active']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    params.append(service_id)
+    query = sql.SQL('UPDATE special_services SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/special-services/<int:service_id>', methods=['DELETE'])
+def delete_special_service(service_id):
+    """删除专项服务预设"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM special_services WHERE id = %s', (service_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 员工账号 CRUD ==========
+
+@admin_required
+@admin_bp.route('/staff', methods=['GET'])
+def get_staff():
+    """获取员工列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, username, full_name, role, is_active, created_at FROM staff ORDER BY id')
+    data = []
+    for row in cursor.fetchall():
+        data.append({
+            'id': row['id'],
+            'username': row['username'],
+            'fullName': row['full_name'],
+            'full_name': row['full_name'],
+            'role': row['role'],
+            'is_active': row['is_active'],
+            'createdAt': row['created_at'].isoformat() if row['created_at'] else None,
+            'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+        })
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/staff', methods=['POST'])
+def create_staff():
+    """创建员工账号"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    username = data.get('username', '')
+    password = data.get('password', '')
+    full_name = data.get('full_name', '') or data.get('fullName', '')
+    role = data.get('role', 'technician')
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': '用户名和密码不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    # 检查用户名是否已存在
+    cursor.execute('SELECT id FROM staff WHERE username = %s', (username,))
+    if cursor.fetchone():
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '用户名已存在'})
+    
+    password_hash = database.hash_password(password)
+    cursor.execute('''
+        INSERT INTO staff (username, password_hash, full_name, role)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+    ''', (username, password_hash, full_name, role))
+    new_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True, 'id': new_id})
+
+@admin_required
+@admin_bp.route('/staff/<int:staff_id>', methods=['PUT'])
+def update_staff(staff_id):
+    """更新员工账号"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    set_clauses = []
+    params = []
+    
+    # 兼容前端驼峰 fullName 和蛇形 full_name
+    if 'fullName' in data and 'full_name' not in data:
+        data['full_name'] = data['fullName']
+    for field in ['username', 'full_name', 'role', 'is_active']:
+        if field in data:
+            set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier(field)))
+            params.append(data[field])
+    
+    if 'password' in data and data['password']:
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('password_hash')))
+        params.append(database.hash_password(data['password']))
+    
+    if not set_clauses:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+    
+    # 防止禁用自己：检查is_active是否从1改为0
+    token_for_self_check = request.headers.get('X-Staff-Token', '')
+    if 'is_active' in data and data['is_active'] == 0:
+        cursor.execute('''
+            SELECT staff_id FROM staff_tokens 
+            WHERE token = %s AND expires_at > NOW()
+        ''', (token_for_self_check,))
+        token_row = cursor.fetchone()
+        if token_row and token_row['staff_id'] == staff_id:
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '不能禁用自己的账号'})
+    
+    params.append(staff_id)
+    query = sql.SQL('UPDATE staff SET {} WHERE id = %s').format(
+        sql.SQL(', ').join(set_clauses)
+    )
+    cursor.execute(query, params)
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/staff/<int:staff_id>', methods=['DELETE'])
+def delete_staff(staff_id):
+    """删除员工账号"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    # 先清理外键关联数据（equipment_inspection_data.staff_id → staff.id）
+    cursor.execute('UPDATE equipment_inspection_data SET staff_id = NULL WHERE staff_id = %s', (staff_id,))
+    # 清理 staff_tokens 关联
+    cursor.execute('DELETE FROM staff_tokens WHERE staff_id = %s', (staff_id,))
+    
+    cursor.execute('DELETE FROM staff WHERE id = %s', (staff_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ========== 价格配置 ==========
+
+@admin_required
+@admin_bp.route('/prices', methods=['GET'])
+def get_prices():
+    """获取价格配置列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT po.*, po.category, pt.name as product_type_name, b.name as brand_name,
+               m.name as model_name, st.name as service_type_name
+        FROM price_overrides po
+        LEFT JOIN product_types pt ON po.product_type_id = pt.id
+        LEFT JOIN brands b ON po.brand_id = b.id
+        LEFT JOIN models m ON po.model_id = m.id
+        LEFT JOIN service_types st ON po.service_type_id = st.id
+        ORDER BY po.created_at DESC
+    ''')
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@admin_required
+@admin_bp.route('/prices', methods=['POST'])
+def create_price():
+    """创建价格配置"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    product_type_id = data.get('product_type_id')
+    brand_id = data.get('brand_id')
+    category = data.get('category', '')
+    model_id = data.get('model_id')
+    service_type_id = data.get('service_type_id')
+    price = data.get('price')
+    
+    if price is None:
+        return jsonify({'success': False, 'message': '价格不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    # Upsert: 先查询是否已存在，存在则更新，否则插入
+    cursor.execute('''
+        SELECT id FROM price_overrides
+        WHERE product_type_id = %s AND brand_id = %s AND (model_id = %s OR (model_id IS NULL AND %s IS NULL))
+          AND (service_type_id = %s OR (service_type_id IS NULL AND %s IS NULL))
+    ''', (product_type_id, brand_id, model_id, model_id, service_type_id, service_type_id))
+    existing = cursor.fetchone()
+    if existing:
+        cursor.execute('UPDATE price_overrides SET price = %s WHERE id = %s', (price, existing['id']))
+        conn.commit()
+        database.release_connection(conn)
+        return jsonify({'success': True, 'id': existing['id'], 'updated': True})
+    else:
+        cursor.execute('''
+            INSERT INTO price_overrides (product_type_id, brand_id, category, model_id, service_type_id, price)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (product_type_id, brand_id, category, model_id, service_type_id, price))
+        new_id = cursor.fetchone()['id']
+        conn.commit()
+        database.release_connection(conn)
+        return jsonify({'success': True, 'id': new_id, 'created': True})
+
+@admin_required
+@admin_bp.route('/prices/<int:price_id>', methods=['PUT'])
+def update_price(price_id):
+    """更新价格配置"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    data = request.get_json()
+    price = data.get('price')
+    
+    if price is None:
+        return jsonify({'success': False, 'message': '价格不能为空'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE price_overrides SET price = %s WHERE id = %s
+    ''', (price, price_id))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/prices/<int:price_id>', methods=['DELETE'])
+def delete_price(price_id):
+    """删除价格配置"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+    
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM price_overrides WHERE id = %s', (price_id,))
+    conn.commit()
+    database.release_connection(conn)
+    
+    return jsonify({'success': True})
+
+# ===== 客户管理 API =====
+
+@admin_required
+@admin_bp.route('/customers', methods=['GET'])
+def get_customers():
+    """获取客户列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    search = request.args.get('search', '').strip()
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    where = ""
+    params = []
+    if search:
+        where = "WHERE (c.name ILIKE %s OR c.phone ILIKE %s OR c.nickname ILIKE %s)"
+        params = [f'%{search}%', f'%{search}%', f'%{search}%']
+
+    # 总数
+    cursor.execute(sql.SQL('SELECT COUNT(*) as cnt FROM customers c {}').format(
+        sql.SQL(where)
+    ), params)
+    total = cursor.fetchone()['cnt']
+
+    # 列表（含订单数和最近地址）
+    offset = (page - 1) * per_page
+    cursor.execute(sql.SQL('''
+        SELECT c.id, c.nickname, c.name, c.phone, c.address,
+               c.is_dealer, c.discount_rate,
+               c.created_at, c.updated_at,
+               (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status != 'deleted') as order_count,
+               (SELECT receiver_address FROM orders WHERE customer_id = c.id
+                ORDER BY created_at DESC LIMIT 1) as last_address
+        FROM customers c
+        {where_clause}
+        ORDER BY c.id DESC
+        LIMIT %s OFFSET %s
+    ''').format(where_clause=sql.SQL(where)), params + [per_page, offset])
+    customers = []
+    for r in cursor.fetchall():
+        customers.append({
+            'id': r['id'],
+            'nickname': r['nickname'] or '',
+            'name': r['name'] or '',
+            'phone': r['phone'] or '',
+            'address': r['address'] or r['last_address'] or '',
+            'is_dealer': r['is_dealer'] == 1,
+            'discount_rate': float(r['discount_rate'] or 100),
+            'order_count': r['order_count'],
+            'created_at': str(r['created_at']),
+            'updated_at': str(r['updated_at']),
+        })
+
+    database.release_connection(conn)
+    return jsonify({
+        'success': True,
+        'data': {
+            'customers': customers,
+            'total': total,
+            'page': page,
+            'per_page': per_page
+        }
+    })
+
+@admin_required
+@admin_bp.route('/customers/<int:customer_id>', methods=['GET'])
+def get_customer_detail(customer_id):
+    """获取客户详情（含地址历史和订单历史）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 基本信息
+    cursor.execute('SELECT * FROM customers WHERE id = %s', (customer_id,))
+    customer = cursor.fetchone()
+    if not customer:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '客户不存在'})
+
+    # 地址历史（从订单历史中提取）
+    cursor.execute('''
+        SELECT DISTINCT ON (receiver_name, receiver_phone, receiver_address)
+               receiver_name, receiver_phone, receiver_address, created_at
+        FROM orders
+        WHERE customer_id = %s AND receiver_address IS NOT NULL AND receiver_address != ''
+        ORDER BY receiver_name, receiver_phone, receiver_address, created_at DESC
+        LIMIT 10
+    ''', (customer_id,))
+    address_rows = cursor.fetchall()
+    addresses = [{
+        'id': idx,
+        'receiver_name': r['receiver_name'] or customer['name'] or '',
+        'receiver_phone': r['receiver_phone'] or customer['phone'] or '',
+        'receiver_address': r['receiver_address'] or '',
+        'created_at': str(r['created_at']) if r.get('created_at') else ''
+    } for idx, r in enumerate(address_rows)]
+
+    # 订单历史
+    cursor.execute('''
+        SELECT id, order_no, status, total_amount, created_at
+        FROM orders
+        WHERE customer_id = %s
+        ORDER BY created_at DESC
+        LIMIT 50
+    ''', (customer_id,))
+    orders = [{
+        'id': r['id'],
+        'order_no': r['order_no'],
+        'status': r['status'],
+        'total_amount': float(r['total_amount'] or 0),
+        'created_at': str(r['created_at'])
+    } for r in cursor.fetchall()]
+
+    # 如果没有 customers.address，使用最近订单的地址
+    customer_address = customer['address'] or ''
+    if not customer_address and addresses:
+        customer_address = addresses[0]['receiver_address']
+
+    database.release_connection(conn)
+    return jsonify({
+        'success': True,
+        'data': {
+            'id': customer['id'],
+            'nickname': customer['nickname'] or '',
+            'name': customer['name'] or '',
+            'phone': customer['phone'] or '',
+            'address': customer_address,
+            'avatar_url': customer['avatar_url'] or '',
+            'openid': customer['openid'] or '',
+            'is_dealer': customer['is_dealer'] == 1,
+            'discount_rate': float(customer['discount_rate'] or 100),
+            'created_at': str(customer['created_at']),
+            'updated_at': str(customer['updated_at']),
+            'addresses': addresses,
+            'orders': orders
+        }
+    })
+
+@admin_required
+@admin_bp.route('/customers/<int:customer_id>', methods=['PUT'])
+def update_customer(customer_id):
+    """更新客户信息"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        UPDATE customers SET name = %s, phone = %s, address = %s, 
+            is_dealer = %s, discount_rate = %s, updated_at = NOW()
+        WHERE id = %s
+    ''', (data.get('name', ''), data.get('phone', ''), data.get('address', ''), 
+          data.get('is_dealer', 0), data.get('discount_rate', 100), customer_id))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/customers/<int:customer_id>', methods=['DELETE'])
+def delete_customer(customer_id):
+    """删除客户"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 检查是否有关联订单
+    cursor.execute('SELECT COUNT(*) as cnt FROM orders WHERE customer_id = %s AND status != %s', (customer_id, 'deleted'))
+    order_count = cursor.fetchone()['cnt']
+    if order_count > 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': f'该客户有 {order_count} 个关联订单，无法删除'})
+
+    cursor.execute('DELETE FROM customers WHERE id = %s', (customer_id,))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/customers/<int:customer_id>/addresses', methods=['POST'])
+def add_customer_address(customer_id):
+    """添加客户地址"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    data = request.get_json()
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        INSERT INTO customer_addresses (customer_id, receiver_name, receiver_phone, receiver_address)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+    ''', (customer_id, data.get('receiver_name', ''), data.get('receiver_phone', ''), data.get('receiver_address', '')))
+    addr_id = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True, 'id': addr_id})
+
+@admin_required
+@admin_bp.route('/customers/<int:customer_id>/addresses/<int:address_id>', methods=['DELETE'])
+def delete_customer_address(customer_id, address_id):
+    """删除客户地址"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM customer_addresses WHERE id = %s AND customer_id = %s', (address_id, customer_id))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True})
+
+@admin_required
+@admin_bp.route('/customers/list', methods=['GET'])
+def get_customers_list():
+    """获取客户简单列表（用于下拉筛选）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, phone, nickname
+        FROM customers
+        ORDER BY id
+    ''')
+    customers = [{
+        'id': r['id'],
+        'name': r['name'] or r['nickname'] or f'客户{r["id"]}',
+        'phone': r['phone'] or ''
+    } for r in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': customers})
+
+
+# ── 数据备份与恢复 ──────────────────────────────────────────────
+
+BACKUP_TABLES = [
+    'product_types', 'brands', 'models', 'service_types', 'service_items',
+    'special_services', 'price_overrides',
+    'orders', 'order_items', 'tracking_nodes', 'equipment_inspection_data',
+    'special_service_records',
+    'customers', 'customer_addresses', 'customer_tokens',
+    'staff', 'staff_tokens',
+]
+
+# 导出时按依赖顺序排列（先导入被依赖的表）
+RESTORE_ORDER = [
+    'product_types', 'brands', 'models', 'service_types', 'service_items',
+    'special_services', 'price_overrides',
+    'staff',
+    'customers', 'customer_addresses', 'customer_tokens',
+    'orders', 'order_items', 'tracking_nodes', 'equipment_inspection_data',
+    'special_service_records',
+    'staff_tokens',
+]
+
+# 需要序列化处理的列（text[] 类型）
+ARRAY_COLUMNS = {
+    'service_items': ['description'],
+    'equipment_inspection_data': [
+        'first_stage_serials', 'first_stage_pre_pressure', 'first_stage_post_pressure',
+        'second_stage_serials', 'second_stage_pre_resistance', 'second_stage_post_resistance',
+    ],
+    'tracking_nodes': ['photos'],
+}
+
+
+@admin_required
+@admin_bp.route('/backup', methods=['GET'])
+def export_backup():
+    """导出全库数据为 JSON"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    backup_data = {}
+    for table in BACKUP_TABLES:
+        try:
+            cursor.execute(sql.SQL('SELECT * FROM {}').format(sql.Identifier(table)))
+            rows = cursor.fetchall()
+            # 将 RealDictRow 转为普通 dict，处理特殊类型
+            serialized = []
+            array_cols = ARRAY_COLUMNS.get(table, [])
+            for row in rows:
+                d = {}
+                for k, v in dict(row).items():
+                    if v is None:
+                        d[k] = None
+                    elif isinstance(v, (list,)) and k in array_cols:
+                        d[k] = list(v)  # PostgreSQL text[] → Python list
+                    elif isinstance(v, datetime):
+                        d[k] = v.isoformat()
+                    elif isinstance(v, date):
+                        d[k] = v.isoformat()
+                    elif isinstance(v, Decimal):
+                        d[k] = float(v)
+                    elif isinstance(v, uuid.UUID):
+                        d[k] = str(v)
+                    else:
+                        d[k] = v
+                serialized.append(d)
+            backup_data[table] = serialized
+        except Exception as e:
+            backup_data[table] = {'_error': str(e)}
+    database.release_connection(conn)
+
+    from flask import Response as FlaskResponse
+    import json as _json
+    payload = _json.dumps({
+        'version': '1.0',
+        'exported_at': datetime.now().isoformat(),
+        'tables': backup_data
+    }, ensure_ascii=False, default=str)
+    return FlaskResponse(payload, mimetype='application/json',
+                         headers={'Content-Disposition':
+                                  f'attachment; filename=selforder_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'})
+
+
+@admin_required
+@admin_bp.route('/backup/restore', methods=['POST'])
+def restore_backup():
+    """从 JSON 备份恢复数据（全量覆盖，危险操作）"""
+    token = request.headers.get('X-Staff-Token', '')
+    if not validate_staff_token(token, allow_inactive=True):
+        return jsonify({'success': False, 'message': '未登录或无权限'}), 401
+
+    data = request.get_json(force=True)
+    confirm = data.get('confirm', False)
+    if not confirm:
+        return jsonify({'success': False, 'message': '需要确认参数 confirm=true'}), 400
+
+    tables_data = data.get('tables', {})
+    if not tables_data:
+        return jsonify({'success': False, 'message': '备份数据为空'}), 400
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    results = {}
+
+    try:
+        # 1. 禁用外键约束
+        cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+
+        # 2. 按依赖顺序清空 + 导入
+        for table in RESTORE_ORDER:
+            if table not in tables_data:
+                continue
+            rows = tables_data[table]
+            if isinstance(rows, dict) and '_error' in rows:
+                continue
+            if not rows:
+                continue
+
+            # 清空表
+            cursor.execute(sql.SQL('TRUNCATE TABLE {} CASCADE').format(
+                sql.Identifier(table)
+            ))
+
+            # 获取列名
+            columns = list(rows[0].keys())
+
+            # 重置序列
+            cursor.execute(sql.SQL("""
+                SELECT setval(pg_get_serial_sequence({lit}, 'id'),
+                             COALESCE((SELECT MAX(id) FROM {tbl}), 1))
+            """).format(
+                lit=sql.Literal(table),
+                tbl=sql.Identifier(table)
+            ))
+
+            inserted = 0
+            for row in rows:
+                values = []
+                for col in columns:
+                    val = row.get(col)
+                    # 数组列需要转回 PostgreSQL 数组格式
+                    if col in ARRAY_COLUMNS.get(table, []) and isinstance(val, list):
+                        values.append(val)  # psycopg2 自动处理 Python list → text[]
+                    else:
+                        values.append(val)
+                try:
+                    cursor.execute(
+                        sql.SQL('INSERT INTO {} ({}) VALUES ({})').format(
+                            sql.Identifier(table),
+                            sql.SQL(', ').join([sql.Identifier(c) for c in columns]),
+                            sql.SQL(', ').join([sql.Placeholder()] * len(columns))
+                        ),
+                        values
+                    )
+                    inserted += 1
+                except Exception as e:
+                    results.setdefault(table, {'errors': []})
+                    results[table].setdefault('errors', []).append(str(e))
+
+            # 重置序列到刚插入的最大 ID
+            cursor.execute(sql.SQL("""
+                SELECT setval(pg_get_serial_sequence({lit}, 'id'),
+                             COALESCE((SELECT MAX(id) FROM {tbl}), 1))
+            """).format(
+                lit=sql.Literal(table),
+                tbl=sql.Identifier(table)
+            ))
+            results[table] = {'imported': inserted}
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': f'恢复失败: {str(e)}', 'results': results}), 500
+
+    database.release_connection(conn)
+    return jsonify({'success': True, 'message': '数据恢复完成', 'results': results})
+
+
+# ========== 归档清理(15天自动清理) ============
+@admin_required
+@admin_bp.route('/archive-cleanup', methods=['POST'])
+def archive_cleanup():
+    """归档清理(仅管理员):完成15天后的订单,清理照片、追踪文字描述,只保留基本记录和无图PDF"""
+    import os, shutil
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token, allow_inactive=True)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或无权限'}), 401
+    if staff.get('role') != 'admin':
+        return jsonify({'success': False, 'message': '仅管理员可执行归档'}), 403
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 查找完成超过15天的订单
+    cursor.execute('''
+        SELECT id, order_no, pdf_path FROM orders
+        WHERE status = 'completed'
+        AND completed_at IS NOT NULL
+        AND archived = 0
+        AND completed_at + INTERVAL '15 days' < NOW()
+    ''')
+
+    orders_to_archive = cursor.fetchall()
+    cleaned_count = 0
+
+    for order in orders_to_archive:
+        order_id = order['id']
+
+        # 清理追踪节点中的照片和文字描述
+        cursor.execute('''
+            UPDATE tracking_nodes
+            SET photos = '[]', description = '', operate_note = ''
+            WHERE order_id = %s
+        ''', (order_id,))
+
+        # 清理专项服务照片
+        cursor.execute('''
+            UPDATE special_service_records
+            SET staff_photos = '[]', description = '', staff_note = ''
+            WHERE order_id = %s
+        ''', (order_id,))
+
+        # 删除本地照片文件(如果有)
+        photos_dir = f'{database.ORDER_UPLOAD_DIR}/{order_id}'
+        if os.path.exists(photos_dir):
+            try:
+                shutil.rmtree(photos_dir)
+            except OSError:
+                pass
+
+        # 标记为已归档
+        cursor.execute('UPDATE orders SET archived = 1, updated_at = NOW() WHERE id = %s', (order_id,))
+        cleaned_count += 1
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'message': f'归档完成,共处理 {cleaned_count} 个订单'
+    })
+
+
+# ── 保养提醒管理 ────────────────────────────────────────
+
+@admin_bp.route('/maintenance-reminders', methods=['GET'])
+def list_maintenance_reminders():
+    """获取保养提醒列表"""
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    status_filter = request.args.get('status', '')
+    customer_id = request.args.get('customer_id', '')
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('pageSize', 20))
+    offset = (page - 1) * page_size
+
+    conditions = []
+    params = []
+    if status_filter:
+        conditions.append('mr.status = %s')
+        params.append(status_filter)
+    if customer_id:
+        conditions.append('mr.customer_id = %s')
+        params.append(int(customer_id))
+    where_clause = ' AND '.join(conditions) if conditions else 'TRUE'
+
+    cursor.execute(f'''
+        SELECT mr.*, c.name as customer_name, c.phone as customer_phone,
+               o.order_no
+        FROM maintenance_reminders mr
+        LEFT JOIN customers c ON c.id = mr.customer_id
+        LEFT JOIN orders o ON o.id = mr.order_id
+        WHERE {where_clause}
+        ORDER BY mr.next_service_date ASC
+        LIMIT %s OFFSET %s
+    ''', params + [page_size, offset])
+    reminders = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute(f'SELECT COUNT(*) FROM maintenance_reminders mr WHERE {where_clause}', params)
+    total = cursor.fetchone()['count']
+
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': reminders, 'total': total})
+
+
+@admin_bp.route('/maintenance-reminders/<int:reminder_id>/dismiss', methods=['PUT'])
+def dismiss_reminder(reminder_id):
+    """忽略/关闭提醒"""
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE maintenance_reminders
+        SET status = 'dismissed', updated_at = NOW()
+        WHERE id = %s
+    ''', (reminder_id,))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True, 'message': '提醒已忽略'})
+
+
+@admin_bp.route('/maintenance-reminders/<int:reminder_id>/reschedule', methods=['PUT'])
+def reschedule_reminder(reminder_id):
+    """重新预约提醒时间"""
+    data = request.get_json() or {}
+    new_date = data.get('next_service_date')
+    if not new_date:
+        return jsonify({'success': False, 'message': '请提供 next_service_date'}), 400
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE maintenance_reminders
+        SET next_service_date = %s, status = 'pending', reminder_sent = FALSE,
+            updated_at = NOW()
+        WHERE id = %s
+    ''', (new_date, reminder_id))
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True, 'message': '提醒时间已更新'})
+
+
+@admin_bp.route('/maintenance-reminders', methods=['POST'])
+def create_manual_reminder():
+    """手动创建保养提醒"""
+    data = request.get_json() or {}
+    equipment_summary = data.get('equipment_summary', '')
+    next_service_date = data.get('next_service_date', '')
+    customer_id = data.get('customer_id')
+
+    if not equipment_summary or not next_service_date:
+        return jsonify({'success': False, 'message': '设备名称和保养日期必填'}), 400
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO maintenance_reminders (customer_id, equipment_summary, next_service_date)
+        VALUES (%s, %s, %s)
+        RETURNING id
+    ''', (customer_id, equipment_summary, next_service_date))
+    rid = cursor.fetchone()['id']
+    conn.commit()
+    database.release_connection(conn)
+    return jsonify({'success': True, 'message': '提醒已创建', 'id': rid})
+
+
+@admin_bp.route('/maintenance-reminders/stats', methods=['GET'])
+def maintenance_stats():
+    """保养提醒统计"""
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'pending' AND next_service_date <= NOW() + INTERVAL '30 days') as upcoming,
+            COUNT(*) FILTER (WHERE status = 'pending' AND next_service_date < NOW()) as overdue_pending,
+            COUNT(*) FILTER (WHERE status = 'overdue') as overdue,
+            COUNT(*) FILTER (WHERE status = 'pending') as total_pending
+        FROM maintenance_reminders
+    ''')
+    row = cursor.fetchone()
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': dict(row)})

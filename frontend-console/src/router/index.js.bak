@@ -1,0 +1,155 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import { useStaffStore } from '@/stores/staff'
+import { ElMessage } from 'element-plus'
+
+const routes = [
+  // 公开路由
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { requiresAuth: false }
+  },
+  // 默认重定向
+  {
+    path: '/',
+    redirect: '/admin'
+  },
+  // 管理后台主布局
+  {
+    path: '/admin',
+    component: () => import('@/views/Layout.vue'),
+    meta: { requiresAuth: true },
+    children: [
+      // 仪表盘
+      {
+        path: '',
+        name: 'Dashboard',
+        component: () => import('@/views/Dashboard.vue'),
+        meta: { title: '首页/仪表盘' }
+      },
+      // 订单
+      {
+        path: 'orders',
+        name: 'OrderList',
+        component: () => import('@/views/orders/OrderList.vue'),
+        meta: { title: '全部订单' }
+      },
+      {
+        path: 'orders/:id',
+        name: 'OrderDetail',
+        component: () => import('@/views/orders/OrderDetail.vue'),
+        meta: { title: '订单详情' }
+      },
+      // 数据管理（Hub）
+      {
+        path: 'hub',
+        name: 'DataHub',
+        component: () => import('@/views/admin/DataHub.vue'),
+        meta: { title: '数据中枢', requiresAdmin: true }
+      },
+      // 产品管理
+      {
+        path: 'types',
+        name: 'ProductTypes',
+        component: () => import('@/views/admin/ProductTypes.vue'),
+        meta: { title: '产品类型', requiresAdmin: true }
+      },
+      {
+        path: 'brands',
+        name: 'Brands',
+        component: () => import('@/views/admin/Brands.vue'),
+        meta: { title: '品牌管理', requiresAdmin: true }
+      },
+      {
+        path: 'models',
+        name: 'Models',
+        component: () => import('@/views/admin/Models.vue'),
+        meta: { title: '型号管理', requiresAdmin: true }
+      },
+      {
+        path: 'categories',
+        name: 'Categories',
+        component: () => import('@/views/admin/Categories.vue'),
+        meta: { title: '产品类别', requiresAdmin: true }
+      },
+      // 服务管理
+      {
+        path: 'services',
+        name: 'ServiceTypes',
+        component: () => import('@/views/admin/ServiceTypes.vue'),
+        meta: { title: '服务类型', requiresAdmin: true }
+      },
+      {
+        path: 'items',
+        name: 'ServiceItems',
+        component: () => import('@/views/admin/ServiceItems.vue'),
+        meta: { title: '服务项目', requiresAdmin: true }
+      },
+      {
+        path: 'special',
+        name: 'SpecialServices',
+        component: () => import('@/views/admin/SpecialServices.vue'),
+        meta: { title: '专项服务', requiresAdmin: true }
+      },
+      // 价格与员工
+      {
+        path: 'prices',
+        name: 'PriceConfig',
+        component: () => import('@/views/admin/PriceConfig.vue'),
+        meta: { title: '价格配置', requiresAdmin: true }
+      },
+      {
+        path: 'staff',
+        name: 'Staff',
+        component: () => import('@/views/admin/Staff.vue'),
+        meta: { title: '员工管理', requiresAdmin: true }
+      },
+      // 账号
+      {
+        path: 'profile',
+        name: 'Profile',
+        component: () => import('@/views/Profile.vue'),
+        meta: { title: '账号设置' }
+      },
+      // 模拟流程
+      {
+        path: 'simulate',
+        name: 'SimulateFlow',
+        component: () => import('@/views/admin/SimulateFlow.vue'),
+        meta: { title: '模拟流程', requiresAdmin: true }
+      }
+    ]
+  }
+]
+
+const router = createRouter({
+  history: createWebHistory('/admin'),
+  routes
+})
+
+// 路由守卫
+router.beforeEach((to, from, next) => {
+  const staffStore = useStaffStore()
+
+  if (to.meta.requiresAuth !== false) {
+    if (!staffStore.isLoggedIn()) {
+      next('/login')
+      return
+    }
+    if (to.meta.requiresAdmin && !staffStore.isAdmin()) {
+      ElMessage.error('没有权限访问此页面')
+      next('/admin')
+      return
+    }
+  }
+
+  if (to.path === '/login' && staffStore.isLoggedIn()) {
+    next('/admin')
+    return
+  }
+
+  next()
+})
+
+export default router

@@ -1,0 +1,1425 @@
+<template>
+  <div class="data-center">
+    <!-- 顶部标题区 -->
+    <div class="page-header">
+      <div class="header-left">
+        <h2>数据管理</h2>
+        <p class="tip">一个页面管理所有基础数据：产品、服务、价格、检项</p>
+      </div>
+      <div class="header-right">
+        <!-- 布局切换 -->
+        <div class="layout-switcher">
+          <span class="switcher-label">布局：</span>
+          <el-radio-group v-model="layoutMode" size="small">
+            <el-radio-button value="brand">品牌中心</el-radio-button>
+            <el-radio-button value="tier">层级递进</el-radio-button>
+            <el-radio-button value="matrix">矩阵视图</el-radio-button>
+          </el-radio-group>
+        </div>
+        <el-input
+          v-model="searchQuery"
+          placeholder="搜索产品类型、品牌、型号..."
+          clearable
+          style="width: 200px; margin-left: 12px;"
+          @input="handleSearch"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+      </div>
+    </div>
+
+    <!-- Tab 切换 -->
+    <div class="tab-bar">
+      <div
+        v-for="tab in tabs"
+        :key="tab.key"
+        class="tab-item"
+        :class="{ active: activeTab === tab.key }"
+        @click="activeTab = tab.key"
+      >
+        <span class="tab-icon">{{ tab.icon }}</span>
+        <span class="tab-label">{{ tab.label }}</span>
+      </div>
+    </div>
+
+    <!-- 产品体系 Tab -->
+    <div v-if="activeTab === 'product'">
+      <!-- 品牌中心布局 -->
+      <BrandCentricLayout v-if="layoutMode === 'brand'" :data="layoutData" @select-brand="handleSelectBrand" @open-dialog="handleOpenDialog" />
+      <!-- 层级递进布局 -->
+      <TierLayout v-else-if="layoutMode === 'tier'" :data="layoutData" @select="handleTierSelect" @open-dialog="handleOpenDialog" />
+      <!-- 矩阵视图 -->
+      <MatrixLayout v-else-if="layoutMode === 'matrix'" :data="layoutData" @select="handleMatrixSelect" @open-dialog="handleOpenDialog" />
+    </div>
+      <!-- 左侧：产品大类导航 -->
+      <div class="sidebar-panel">
+        <div class="panel-title">
+          <span>产品大类</span>
+          <el-button type="primary" link size="small" @click="openTypeDialog()">+ 新增</el-button>
+        </div>
+        <div class="type-list">
+          <div
+            v-for="type in productTypes"
+            :key="type.id"
+            class="type-item"
+            :class="{ active: selectedType?.id === type.id }"
+          >
+            <div class="type-content" @click="selectType(type)">
+              <div class="type-name">{{ type.name }}</div>
+              <div class="type-meta">
+                <el-tag size="small" type="info">{{ getTypeStats(type.id) }}</el-tag>
+              </div>
+            </div>
+            <div class="type-actions">
+              <el-button type="primary" link size="small" @click.stop="openTypeDialog(type)">编辑</el-button>
+              <el-button type="danger" link size="small" @click.stop="deleteProductType(type)">删除</el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 中间：产品类型 + 品牌 -->
+      <div class="content-panel">
+        <!-- 产品类型区 -->
+        <div class="section" v-if="selectedType">
+          <div class="section-header">
+            <h3>产品类型</h3>
+            <el-button type="primary" link size="small" @click="openCategoryDialog()">+ 新增类型</el-button>
+          </div>
+          <div class="category-tags">
+            <el-tag
+              v-for="cat in typeCategories"
+              :key="cat.id"
+              :type="selectedCategory?.id === cat.id ? 'primary' : 'info'"
+              size="large"
+              class="category-tag"
+              @click="selectCategory(cat)"
+            >
+              {{ cat.name }}
+              <span class="tag-count">({{ getCategoryModelCount(cat.id) }})</span>
+              <el-icon class="tag-edit" @click.stop="openCategoryDialog(cat)"><Edit /></el-icon>
+            </el-tag>
+            <el-tag v-if="!typeCategories.length" type="info" size="large">暂无产品类型</el-tag>
+          </div>
+          <!-- 产品类型操作栏 -->
+          <div v-if="selectedCategory" class="category-actions">
+            <el-button type="primary" link size="small" @click="openCategoryDialog(selectedCategory)">编辑</el-button>
+            <el-button type="danger" link size="small" @click="deleteCategory(selectedCategory)">删除</el-button>
+          </div>
+        </div>
+
+        <!-- 品牌区 -->
+        <div class="section" v-if="selectedType">
+          <div class="section-header">
+            <h3>品牌</h3>
+            <el-button type="primary" link size="small" @click="openBrandDialog()">+ 新增品牌</el-button>
+          </div>
+          <div class="brand-grid">
+            <div
+              v-for="brand in typeBrands"
+              :key="brand.id"
+              class="brand-card"
+              :class="{ active: selectedBrand?.id === brand.id }"
+            >
+              <div class="brand-content" @click="selectBrand(brand)">
+                <div class="brand-name">{{ brand.name }}</div>
+                <div class="brand-count">{{ getBrandModelCount(brand.id) }} 个型号</div>
+              </div>
+              <div class="brand-actions">
+                <el-button type="primary" link size="small" @click.stop="openBrandDialog(brand)">编辑</el-button>
+                <el-button type="danger" link size="small" @click.stop="deleteBrand(brand)">删除</el-button>
+              </div>
+            </div>
+            <el-empty v-if="!typeBrands.length" description="暂无品牌" :image-size="60" />
+          </div>
+        </div>
+
+        <!-- 型号详情区 -->
+        <div class="section" v-if="selectedBrand">
+          <div class="section-header">
+            <h3>型号列表</h3>
+            <el-button type="primary" link size="small" @click="openModelDialog()">+ 新增型号</el-button>
+          </div>
+          <el-table :data="brandModels" size="small" stripe>
+            <el-table-column prop="name" label="型号名称" min-width="150" />
+            <el-table-column label="产品类型" width="200">
+              <template #default="{ row }">
+                <div class="model-categories">
+                  <el-tag v-for="cat in row.categories" :key="cat" size="small" type="info">
+                    {{ cat }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.is_active === 1 ? 'success' : 'info'" size="small">
+                  {{ row.is_active === 1 ? '启用' : '禁用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" align="center">
+              <template #default="{ row }">
+                <el-button type="primary" link size="small" @click="openModelDialog(row)">编辑</el-button>
+                <el-button type="danger" link size="small" @click="deleteModel(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+
+      <!-- 右侧：服务与价格 -->
+      <div class="right-panel">
+        <!-- 服务类型 -->
+        <div class="section">
+          <div class="section-header">
+            <h3>服务类型</h3>
+            <el-button type="primary" link size="small" @click="openServiceTypeDialog()">+ 新增</el-button>
+          </div>
+          <div class="service-list">
+            <div v-for="service in filteredServiceTypes" :key="service.id" class="service-item">
+              <div class="service-info">
+                <span class="service-name">{{ service.name }}</span>
+                <span class="service-price">¥{{ service.base_price }}</span>
+              </div>
+              <div class="service-desc">{{ service.description || '无描述' }}</div>
+            </div>
+            <el-empty v-if="!filteredServiceTypes.length" description="暂无服务类型" :image-size="60" />
+          </div>
+        </div>
+
+        <!-- 检项 -->
+        <div class="section">
+          <div class="section-header">
+            <h3>维修检项</h3>
+            <el-button type="primary" link size="small" @click="openServiceItemDialog()">+ 新增</el-button>
+          </div>
+          <div class="item-list">
+            <div v-for="item in filteredServiceItems" :key="item.id" class="item-row">
+              <el-tag :type="item.is_required === 1 ? 'danger' : 'default'" size="small">
+                {{ item.is_required === 1 ? '必检' : '可检' }}
+              </el-tag>
+              <span class="item-name">{{ item.name }}</span>
+            </div>
+            <el-empty v-if="!filteredServiceItems.length" description="暂无检项" :image-size="60" />
+          </div>
+        </div>
+
+        <!-- 价格配置 -->
+        <div class="section">
+          <div class="section-header">
+            <h3>价格配置</h3>
+            <el-button type="primary" link size="small" @click="openPriceDialog()">+ 新增</el-button>
+          </div>
+          <div class="price-list">
+            <div v-for="price in filteredPrices" :key="price.id" class="price-item">
+              <div class="price-info">
+                <span>{{ price.service_type_name }}</span>
+                <span v-if="price.category" class="price-category">{{ price.category }}</span>
+                <span v-if="price.model_name" class="price-model">{{ price.model_name }}</span>
+              </div>
+              <span class="price-value">¥{{ price.price }}</span>
+            </div>
+            <el-empty v-if="!filteredPrices.length" description="暂无价格配置" :image-size="60" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 服务体系 Tab -->
+    <div v-if="activeTab === 'service'" class="full-panel">
+      <div class="section">
+        <div class="section-header">
+          <h3>服务类型管理</h3>
+          <el-button type="primary" @click="openServiceTypeDialog()">+ 新增服务类型</el-button>
+        </div>
+        <el-table :data="serviceTypes" size="small" stripe>
+          <el-table-column prop="name" label="服务名称" min-width="150" />
+          <el-table-column prop="product_type_name" label="所属产品" width="120" />
+          <el-table-column prop="base_price" label="基础价格" width="100">
+            <template #default="{ row }">
+              <span class="price-tag">¥{{ row.base_price }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
+          <el-table-column label="状态" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag :type="row.is_active === 1 ? 'success' : 'info'" size="small">
+                {{ row.is_active === 1 ? '启用' : '禁用' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" align="center" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="openServiceTypeDialog(row)">编辑</el-button>
+              <el-button type="danger" link size="small" @click="deleteServiceType(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="section" style="margin-top: 20px;">
+        <div class="section-header">
+          <h3>维修检项管理</h3>
+          <el-button type="primary" @click="openServiceItemDialog()">+ 新增检项</el-button>
+        </div>
+        <el-table :data="serviceItems" size="small" stripe>
+          <el-table-column prop="name" label="检项名称" min-width="200" />
+          <el-table-column prop="product_type_name" label="所属产品" width="120" />
+          <el-table-column label="类型" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag :type="row.is_required === 1 ? 'danger' : 'warning'" size="small">
+                {{ row.is_required === 1 ? '必检' : '可检' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" align="center" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="openServiceItemDialog(row)">编辑</el-button>
+              <el-button type="danger" link size="small" @click="deleteServiceItem(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </div>
+
+    <!-- 价格体系 Tab -->
+    <div v-if="activeTab === 'price'" class="full-panel">
+      <div class="section">
+        <div class="section-header">
+          <h3>价格配置管理</h3>
+          <el-button type="primary" @click="openPriceDialog()">+ 新增价格</el-button>
+        </div>
+        <el-table :data="prices" size="small" stripe>
+          <el-table-column prop="service_type_name" label="服务类型" min-width="150" />
+          <el-table-column prop="product_type_name" label="产品大类" width="120" />
+          <el-table-column prop="category" label="产品类型" width="120" />
+          <el-table-column prop="brand_name" label="品牌" width="120" />
+          <el-table-column prop="model_name" label="型号" width="150" />
+          <el-table-column prop="price" label="价格" width="100">
+            <template #default="{ row }">
+              <span class="price-tag">¥{{ row.price }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" align="center" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="openPriceDialog(row)">编辑</el-button>
+              <el-button type="danger" link size="small" @click="deletePrice(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </div>
+
+    <!-- 弹窗们 -->
+    <!-- 产品大类弹窗 -->
+    <el-dialog v-model="typeDialogVisible" :title="isEditType ? '编辑产品大类' : '新增产品大类'" width="500px">
+      <el-form :model="typeForm" ref="typeFormRef" label-width="100px">
+        <el-form-item label="名称" required>
+          <el-input v-model="typeForm.name" placeholder="如：调节器" />
+        </el-form-item>
+        <el-form-item label="套装分类">
+          <el-select
+            v-model="typeForm.categories"
+            placeholder="选择关联的产品类型"
+            multiple
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="opt in categoryOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="typeForm.sort_order" :min="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="typeDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitType" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 产品类型弹窗 -->
+    <el-dialog v-model="categoryDialogVisible" :title="isEditCategory ? '编辑产品类型' : '新增产品类型'" width="500px">
+      <el-form :model="categoryForm" ref="categoryFormRef" label-width="100px">
+        <el-form-item label="名称" required>
+          <el-input v-model="categoryForm.name" placeholder="如：一级头" />
+        </el-form-item>
+        <el-form-item label="归属产品大类" required>
+          <el-select v-model="categoryForm.product_type_id" placeholder="选择所属产品大类" style="width: 100%">
+            <el-option v-for="type in productTypes" :key="type.id" :label="type.name" :value="type.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="categoryForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="categoryForm.sort_order" :min="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="categoryDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitCategory" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 品牌弹窗 -->
+    <el-dialog v-model="brandDialogVisible" :title="isEditBrand ? '编辑品牌' : '新增品牌'" width="500px">
+      <el-form :model="brandForm" ref="brandFormRef" label-width="100px">
+        <el-form-item label="品牌名称" required>
+          <el-input v-model="brandForm.name" placeholder="如：Scubapro" />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="brandForm.sort_order" :min="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="brandDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitBrand" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 型号弹窗 -->
+    <el-dialog v-model="modelDialogVisible" :title="isEditModel ? '编辑型号' : '新增型号'" width="500px">
+      <el-form :model="modelForm" ref="modelFormRef" label-width="100px">
+        <el-form-item label="型号名称" required>
+          <el-input v-model="modelForm.name" placeholder="如：MK25 EVO" />
+        </el-form-item>
+        <el-form-item label="产品类型" required>
+          <el-checkbox-group v-model="modelForm.category_ids">
+            <el-checkbox v-for="cat in allCategories" :key="cat.id" :label="cat.id">
+              {{ cat.name }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="modelDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitModel" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 服务类型弹窗 -->
+    <el-dialog v-model="serviceTypeDialogVisible" :title="isEditServiceType ? '编辑服务类型' : '新增服务类型'" width="500px">
+      <el-form :model="serviceTypeForm" ref="serviceTypeFormRef" label-width="100px">
+        <el-form-item label="服务名称" required>
+          <el-input v-model="serviceTypeForm.name" placeholder="如：标准套装保养" />
+        </el-form-item>
+        <el-form-item label="所属产品" required>
+          <el-select v-model="serviceTypeForm.product_type_id" placeholder="选择产品大类" style="width: 100%">
+            <el-option v-for="type in productTypes" :key="type.id" :label="type.name" :value="type.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="基础价格" required>
+          <el-input-number v-model="serviceTypeForm.base_price" :min="0" :precision="2" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="serviceTypeForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="serviceTypeDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitServiceType" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 检项弹窗 -->
+    <el-dialog v-model="serviceItemDialogVisible" :title="isEditServiceItem ? '编辑检项' : '新增检项'" width="500px">
+      <el-form :model="serviceItemForm" ref="serviceItemFormRef" label-width="100px">
+        <el-form-item label="检项名称" required>
+          <el-input v-model="serviceItemForm.name" placeholder="如：检查O型圈" />
+        </el-form-item>
+        <el-form-item label="所属产品" required>
+          <el-select v-model="serviceItemForm.product_type_id" placeholder="选择产品大类" style="width: 100%">
+            <el-option v-for="type in productTypes" :key="type.id" :label="type.name" :value="type.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="是否必检">
+          <el-switch v-model="serviceItemForm.is_required" :active-value="1" :inactive-value="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="serviceItemDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitServiceItem" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 价格弹窗 -->
+    <el-dialog v-model="priceDialogVisible" :title="isEditPrice ? '编辑价格' : '新增价格'" width="500px">
+      <el-form :model="priceForm" ref="priceFormRef" label-width="100px">
+        <el-form-item label="服务类型" required>
+          <el-select v-model="priceForm.service_type_id" placeholder="选择服务类型" style="width: 100%">
+            <el-option v-for="service in serviceTypes" :key="service.id" :label="service.name" :value="service.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="产品大类" required>
+          <el-select v-model="priceForm.product_type_id" placeholder="选择产品大类" style="width: 100%" @change="onPriceTypeChange">
+            <el-option v-for="type in productTypes" :key="type.id" :label="type.name" :value="type.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="产品类型">
+          <el-select v-model="priceForm.category_id" placeholder="选择产品类型（可选）" clearable style="width: 100%">
+            <el-option v-for="cat in priceCategories" :key="cat.id" :label="cat.name" :value="cat.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="品牌">
+          <el-select v-model="priceForm.brand_id" placeholder="选择品牌（可选）" clearable style="width: 100%">
+            <el-option v-for="brand in priceBrands" :key="brand.id" :label="brand.name" :value="brand.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="型号">
+          <el-select v-model="priceForm.model_id" placeholder="选择型号（可选）" clearable style="width: 100%">
+            <el-option v-for="model in priceModels" :key="model.id" :label="model.name" :value="model.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="价格" required>
+          <el-input-number v-model="priceForm.price" :min="0" :precision="2" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="priceDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitPrice" :loading="submitLoading">确定</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search, Edit } from '@element-plus/icons-vue'
+import request from '@/utils/request'
+
+// ============ Tab 配置 ============
+const tabs = [
+  { key: 'product', label: '产品体系', icon: '' },
+  { key: 'service', label: '服务体系', icon: '' },
+  { key: 'price', label: '价格体系', icon: '' }
+]
+const activeTab = ref('product')
+
+// ============ 布局模式 ============
+const layoutMode = ref('brand')
+
+// ============ 搜索 ============
+const searchQuery = ref('')
+const handleSearch = () => {
+  // 搜索功能：根据输入过滤显示
+  if (!searchQuery.value) {
+    selectedType.value = null
+    selectedCategory.value = null
+    selectedBrand.value = null
+    return
+  }
+  const query = searchQuery.value.toLowerCase()
+  // 搜索型号
+  const foundModel = models.value.find(m => m.name.toLowerCase().includes(query))
+  if (foundModel) {
+    const brand = brands.value.find(b => b.id === foundModel.brand_id)
+    if (brand) {
+      const type = productTypes.value.find(t => t.id === brand.product_type_id)
+      if (type) {
+        selectedType.value = type
+        selectedBrand.value = brand
+        return
+      }
+    }
+  }
+  // 搜索品牌
+  const foundBrand = brands.value.find(b => b.name.toLowerCase().includes(query))
+  if (foundBrand) {
+    const type = productTypes.value.find(t => t.id === foundBrand.product_type_id)
+    if (type) {
+      selectedType.value = type
+      selectedBrand.value = foundBrand
+      return
+    }
+  }
+}
+
+// ============ 数据状态 ============
+const productTypes = ref([])
+const categories = ref([])
+const brands = ref([])
+const models = ref([])
+const serviceTypes = ref([])
+const serviceItems = ref([])
+const prices = ref([])
+
+const selectedType = ref(null)
+const selectedCategory = ref(null)
+const selectedBrand = ref(null)
+
+const loading = ref(false)
+const submitLoading = ref(false)
+
+// ============ 计算属性 ============
+const typeCategories = computed(() => {
+  if (!selectedType.value) return []
+  return categories.value.filter(c => {
+    if (selectedType.value.categories) {
+      try {
+        const cats = JSON.parse(selectedType.value.categories)
+        return cats.includes(c.name)
+      } catch {
+        return true
+      }
+    }
+    return true
+  })
+})
+
+const typeBrands = computed(() => {
+  if (!selectedType.value) return []
+  return brands.value.filter(b => b.product_type_id == selectedType.value.id)
+})
+
+const brandModels = computed(() => {
+  if (!selectedBrand.value) return []
+  return models.value.filter(m => m.brand_id == selectedBrand.value.id)
+})
+
+const filteredServiceTypes = computed(() => {
+  if (!selectedType.value) return serviceTypes.value
+  return serviceTypes.value.filter(s => s.product_type_id == selectedType.value.id)
+})
+
+const filteredServiceItems = computed(() => {
+  if (!selectedType.value) return serviceItems.value
+  return serviceItems.value.filter(i => i.product_type_id == selectedType.value.id)
+})
+
+const filteredPrices = computed(() => {
+  let result = prices.value
+  if (selectedType.value) {
+    result = result.filter(p => p.product_type_id == selectedType.value.id)
+  }
+  if (selectedBrand.value) {
+    result = result.filter(p => p.brand_id == selectedBrand.value.id)
+  }
+  return result
+})
+
+const categoryOptions = computed(() => {
+  return categories.value.map(c => ({ label: c.name, value: c.name }))
+})
+
+const allCategories = computed(() => categories.value)
+
+// 价格弹窗联动
+const priceCategories = computed(() => {
+  if (!priceForm.value.product_type_id) return []
+  return categories.value.filter(c => {
+    const type = productTypes.value.find(t => t.id === priceForm.value.product_type_id)
+    if (type && type.categories) {
+      try {
+        const cats = JSON.parse(type.categories)
+        return cats.includes(c.name)
+      } catch { return true }
+    }
+    return true
+  })
+})
+
+const priceBrands = computed(() => {
+  if (!priceForm.value.product_type_id) return []
+  return brands.value.filter(b => b.product_type_id == priceForm.value.product_type_id)
+})
+
+const priceModels = computed(() => {
+  if (!priceForm.value.brand_id) return []
+  return models.value.filter(m => m.brand_id == priceForm.value.brand_id)
+})
+
+// ============ 方法 ============
+const selectType = (type) => {
+  selectedType.value = type
+  selectedCategory.value = null
+  selectedBrand.value = null
+}
+
+const selectCategory = (cat) => {
+  selectedCategory.value = selectedCategory.value?.id === cat.id ? null : cat
+}
+
+const selectBrand = (brand) => {
+  selectedBrand.value = selectedBrand.value?.id === brand.id ? null : brand
+}
+
+const getTypeStats = (typeId) => {
+  const typeBrands = brands.value.filter(b => b.product_type_id == typeId)
+  const brandIds = typeBrands.map(b => b.id)
+  const typeModels = models.value.filter(m => brandIds.includes(m.brand_id))
+  return `${typeBrands.length}品牌 ${typeModels.length}型号`
+}
+
+const getCategoryModelCount = (categoryId) => {
+  const category = categories.value.find(c => c.id === categoryId)
+  if (!category) return 0
+  return models.value.filter(m => m.categories && m.categories.includes(category.name)).length
+}
+
+const getBrandModelCount = (brandId) => {
+  return models.value.filter(m => m.brand_id == brandId).length
+}
+
+// ============ 数据加载 ============
+const fetchAllData = async () => {
+  loading.value = true
+  try {
+    const [typesRes, catsRes, brandsRes, modelsRes, servicesRes, itemsRes, pricesRes] = await Promise.all([
+      request.get('/admin/product-types'),
+      request.get('/admin/categories'),
+      request.get('/admin/brands'),
+      request.get('/admin/models'),
+      request.get('/admin/service-types'),
+      request.get('/admin/service-items'),
+      request.get('/admin/prices')
+    ])
+
+    productTypes.value = Array.isArray(typesRes) ? typesRes : (typesRes?.data || [])
+    categories.value = Array.isArray(catsRes) ? catsRes : (catsRes?.data || [])
+    brands.value = Array.isArray(brandsRes) ? brandsRes : (brandsRes?.data || [])
+    models.value = Array.isArray(modelsRes) ? modelsRes : (modelsRes?.data || [])
+    serviceTypes.value = Array.isArray(servicesRes) ? servicesRes : (servicesRes?.data || [])
+    serviceItems.value = Array.isArray(itemsRes) ? itemsRes : (itemsRes?.data || [])
+    prices.value = Array.isArray(pricesRes) ? pricesRes : (pricesRes?.data || [])
+  } catch (error) {
+    console.error('Failed to fetch data:', error)
+    ElMessage.error('数据加载失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+// ============ 弹窗逻辑 ============
+const typeDialogVisible = ref(false)
+const isEditType = ref(false)
+const typeForm = ref({ id: '', name: '', categories: [], sort_order: 0 })
+const typeFormRef = ref(null)
+
+const openTypeDialog = (row = null) => {
+  isEditType.value = !!row
+  typeForm.value = row
+    ? { ...row, categories: row.categories ? JSON.parse(row.categories) : [] }
+    : { id: '', name: '', categories: [], sort_order: 0 }
+  typeDialogVisible.value = true
+}
+
+const submitType = async () => {
+  submitLoading.value = true
+  try {
+    const payload = { ...typeForm.value, categories: JSON.stringify(typeForm.value.categories) }
+    if (isEditType.value) {
+      await request.put(`/admin/product-types/${typeForm.value.id}`, payload)
+    } else {
+      await request.post('/admin/product-types', payload)
+    }
+    ElMessage.success('保存成功')
+    typeDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteProductType = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该产品大类？关联的品牌和型号将失去分类。', '提示', { type: 'warning' })
+    await request.delete(`/admin/product-types/${row.id}`)
+    ElMessage.success('删除成功')
+    if (selectedType.value?.id === row.id) {
+      selectedType.value = null
+      selectedCategory.value = null
+      selectedBrand.value = null
+    }
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+const categoryDialogVisible = ref(false)
+const isEditCategory = ref(false)
+const categoryForm = ref({ id: '', name: '', product_type_id: '', description: '', sort_order: 0 })
+const categoryFormRef = ref(null)
+
+const openCategoryDialog = (row = null) => {
+  isEditCategory.value = !!row
+  categoryForm.value = row ? { ...row } : { id: '', name: '', product_type_id: selectedType.value?.id || '', description: '', sort_order: 0 }
+  categoryDialogVisible.value = true
+}
+
+const submitCategory = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditCategory.value) {
+      await request.put(`/admin/categories/${categoryForm.value.id}`, categoryForm.value)
+    } else {
+      await request.post('/admin/categories', categoryForm.value)
+    }
+    ElMessage.success('保存成功')
+    categoryDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteCategory = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该产品类型？关联的型号将失去该类型标记。', '提示', { type: 'warning' })
+    await request.delete(`/admin/categories/${row.id}`)
+    ElMessage.success('删除成功')
+    if (selectedCategory.value?.id === row.id) {
+      selectedCategory.value = null
+    }
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+const brandDialogVisible = ref(false)
+const isEditBrand = ref(false)
+const brandForm = ref({ id: '', name: '', product_type_id: '', sort_order: 0 })
+const brandFormRef = ref(null)
+
+const openBrandDialog = (row = null) => {
+  isEditBrand.value = !!row
+  brandForm.value = row
+    ? { ...row }
+    : { id: '', name: '', product_type_id: selectedType.value?.id || '', sort_order: 0 }
+  brandDialogVisible.value = true
+}
+
+const submitBrand = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditBrand.value) {
+      await request.put(`/admin/brands/${brandForm.value.id}`, brandForm.value)
+    } else {
+      await request.post('/admin/brands', brandForm.value)
+    }
+    ElMessage.success('保存成功')
+    brandDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteBrand = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该品牌？关联的型号将被一并删除。', '提示', { type: 'warning' })
+    await request.delete(`/admin/brands/${row.id}`)
+    ElMessage.success('删除成功')
+    if (selectedBrand.value?.id === row.id) {
+      selectedBrand.value = null
+    }
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+const modelDialogVisible = ref(false)
+const isEditModel = ref(false)
+const modelForm = ref({ id: '', name: '', brand_id: '', category_ids: [], is_active: 1 })
+const modelFormRef = ref(null)
+
+const openModelDialog = (row = null) => {
+  isEditModel.value = !!row
+  modelForm.value = row
+    ? { ...row, category_ids: row.category_ids || [] }
+    : { id: '', name: '', brand_id: selectedBrand.value?.id || '', category_ids: [], is_active: 1 }
+  modelDialogVisible.value = true
+}
+
+const submitModel = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditModel.value) {
+      await request.put(`/admin/models/${modelForm.value.id}`, modelForm.value)
+    } else {
+      await request.post('/admin/models', modelForm.value)
+    }
+    ElMessage.success('保存成功')
+    modelDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteModel = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该型号？', '提示', { type: 'warning' })
+    await request.delete(`/admin/models/${row.id}`)
+    ElMessage.success('删除成功')
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+// 服务类型弹窗
+const serviceTypeDialogVisible = ref(false)
+const isEditServiceType = ref(false)
+const serviceTypeForm = ref({ id: '', name: '', product_type_id: '', base_price: 0, description: '', is_active: 1 })
+const serviceTypeFormRef = ref(null)
+
+const openServiceTypeDialog = (row = null) => {
+  isEditServiceType.value = !!row
+  serviceTypeForm.value = row
+    ? { ...row }
+    : { id: '', name: '', product_type_id: selectedType.value?.id || '', base_price: 0, description: '', is_active: 1 }
+  serviceTypeDialogVisible.value = true
+}
+
+const submitServiceType = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditServiceType.value) {
+      await request.put(`/admin/service-types/${serviceTypeForm.value.id}`, serviceTypeForm.value)
+    } else {
+      await request.post('/admin/service-types', serviceTypeForm.value)
+    }
+    ElMessage.success('保存成功')
+    serviceTypeDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteServiceType = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该服务类型？', '提示', { type: 'warning' })
+    await request.delete(`/admin/service-types/${row.id}`)
+    ElMessage.success('删除成功')
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+// 检项弹窗
+const serviceItemDialogVisible = ref(false)
+const isEditServiceItem = ref(false)
+const serviceItemForm = ref({ id: '', name: '', product_type_id: '', is_required: 0 })
+const serviceItemFormRef = ref(null)
+
+const openServiceItemDialog = (row = null) => {
+  isEditServiceItem.value = !!row
+  serviceItemForm.value = row
+    ? { ...row }
+    : { id: '', name: '', product_type_id: selectedType.value?.id || '', is_required: 0 }
+  serviceItemDialogVisible.value = true
+}
+
+const submitServiceItem = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditServiceItem.value) {
+      await request.put(`/admin/service-items/${serviceItemForm.value.id}`, serviceItemForm.value)
+    } else {
+      await request.post('/admin/service-items', serviceItemForm.value)
+    }
+    ElMessage.success('保存成功')
+    serviceItemDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deleteServiceItem = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该检项？', '提示', { type: 'warning' })
+    await request.delete(`/admin/service-items/${row.id}`)
+    ElMessage.success('删除成功')
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+// 价格弹窗
+const priceDialogVisible = ref(false)
+const isEditPrice = ref(false)
+const priceForm = ref({ id: '', service_type_id: '', product_type_id: '', category_id: '', brand_id: '', model_id: '', price: 0 })
+const priceFormRef = ref(null)
+
+const onPriceTypeChange = () => {
+  priceForm.value.category_id = ''
+  priceForm.value.brand_id = ''
+  priceForm.value.model_id = ''
+}
+
+const openPriceDialog = (row = null) => {
+  isEditPrice.value = !!row
+  priceForm.value = row
+    ? { ...row }
+    : { id: '', service_type_id: '', product_type_id: selectedType.value?.id || '', category_id: '', brand_id: '', model_id: '', price: 0 }
+  priceDialogVisible.value = true
+}
+
+const submitPrice = async () => {
+  submitLoading.value = true
+  try {
+    if (isEditPrice.value) {
+      await request.put(`/admin/prices/${priceForm.value.id}`, priceForm.value)
+    } else {
+      await request.post('/admin/prices', priceForm.value)
+    }
+    ElMessage.success('保存成功')
+    priceDialogVisible.value = false
+    fetchAllData()
+  } catch (error) {
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const deletePrice = async (row) => {
+  try {
+    await ElMessageBox.confirm('确定删除该价格配置？', '提示', { type: 'warning' })
+    await request.delete(`/admin/prices/${row.id}`)
+    ElMessage.success('删除成功')
+    fetchAllData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.message || '删除失败')
+    }
+  }
+}
+
+onMounted(() => {
+  fetchAllData()
+})
+</script>
+
+<style scoped>
+.data-center {
+  padding: 20px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.page-header h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.tip {
+  margin: 0;
+  color: #999;
+  font-size: 13px;
+}
+
+/* Tab 栏 */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  background: #f5f7fa;
+  padding: 4px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.tab-item {
+  padding: 10px 24px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #666;
+}
+
+.tab-item:hover {
+  background: #fff;
+}
+
+.tab-item.active {
+  background: #fff;
+  color: #409eff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.tab-icon {
+  font-size: 16px;
+}
+
+/* 主布局 */
+.main-layout {
+  display: flex;
+  gap: 16px;
+  height: calc(100% - 120px);
+  min-height: 600px;
+}
+
+.full-panel {
+  height: calc(100% - 120px);
+  overflow-y: auto;
+}
+
+/* 左侧面板 */
+.sidebar-panel {
+  width: 240px;
+  flex-shrink: 0;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-title {
+  padding: 16px;
+  border-bottom: 1px solid #e4e7ed;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.type-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.type-item {
+  padding: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 4px;
+  position: relative;
+}
+
+.type-item:hover {
+  background: #f5f7fa;
+}
+
+.type-item.active {
+  background: #ecf5ff;
+  border-left: 3px solid #409eff;
+}
+
+.type-content {
+  flex: 1;
+}
+
+.type-name {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.type-meta {
+  font-size: 12px;
+}
+
+.type-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e4e7ed;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.type-item:hover .type-actions {
+  opacity: 1;
+}
+
+/* 中间面板 */
+.content-panel {
+  flex: 1;
+  min-width: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 右侧面板 */
+.right-panel {
+  width: 320px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 通用区块 */
+.section {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
+  padding: 16px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.section-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+/* 产品类型标签 */
+.category-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.category-tag {
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.category-tag:hover {
+  transform: scale(1.05);
+}
+
+.tag-count {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
+.tag-edit {
+  margin-left: 6px;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  cursor: pointer;
+}
+
+.category-tag:hover .tag-edit {
+  opacity: 0.6;
+}
+
+.tag-edit:hover {
+  opacity: 1 !important;
+  color: #409eff;
+}
+
+/* 品牌网格 */
+.brand-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.brand-card {
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.brand-card:hover {
+  border-color: #409eff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.15);
+}
+
+.brand-card.active {
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+
+.brand-content {
+  flex: 1;
+}
+
+.brand-name {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.brand-count {
+  font-size: 12px;
+  color: #999;
+}
+
+.brand-actions {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e4e7ed;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.brand-card:hover .brand-actions {
+  opacity: 1;
+}
+
+/* 产品类型操作栏 */
+.category-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e4e7ed;
+}
+
+/* 型号分类标签 */
+.model-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 服务列表 */
+.service-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.service-item {
+  padding: 10px;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
+
+.service-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.service-name {
+  font-weight: 500;
+}
+
+.service-price {
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+.service-desc {
+  font-size: 12px;
+  color: #999;
+}
+
+/* 检项列表 */
+.item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+
+.item-name {
+  font-size: 13px;
+}
+
+/* 价格列表 */
+.price-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.price-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+
+.price-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.price-category, .price-model {
+  font-size: 11px;
+  color: #999;
+}
+
+.price-value {
+  color: #e6a23c;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.price-tag {
+  color: #e6a23c;
+  font-weight: 600;
+}
+</style>

@@ -1,0 +1,2250 @@
+# -*- coding: utf-8 -*-
+"""
+控制台API路由（员工使用）
+"""
+from flask import Blueprint, request, jsonify, send_file
+import database
+import shutil
+import json
+import os
+import base64
+from datetime import datetime, timedelta
+import secrets
+from psycopg2 import sql
+from pydantic import ValidationError
+from validators import StaffLogin
+from logging_config import get_logger
+
+logger = get_logger('routes_console')
+
+console_bp = Blueprint('console', __name__)
+
+from auth import validate_staff_token, generate_token
+from notification import _integration_hook_notify, notify_ship
+
+def log_status_change(conn, order_id, field, old_value, new_value, changed_by, changed_via='console'):
+    """Record state machine transitions in audit log. Never blocks on failure."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO status_change_log (order_id, field, old_value, new_value, changed_by, changed_via) VALUES (%s, %s, %s, %s, %s, %s)',
+            (order_id, field, old_value, new_value, changed_by, changed_via)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning('status_change_log insert failed for order %s: %s', order_id, e)
+
+
+def save_base64_image(base64_data, order_id, node_id=None):
+    """保存base64图片到节点的photos目录"""
+    try:
+        # 解析base64
+        if ',' in base64_data:
+            base64_data = base64_data.split(',')[1]
+
+        image_data = base64.b64decode(base64_data)
+
+        # 验证文件内容是否为合法图片（magic bytes 检查）
+        _IMAGE_SIGNATURES = {
+            b'\xff\xd8\xff': 'jpg',
+            b'\x89PNG': 'png',
+            b'RIFF': 'webp',  # WebP 以 RIFF 开头
+        }
+        ext = None
+        for sig, fmt in _IMAGE_SIGNATURES.items():
+            if image_data[:len(sig)] == sig:
+                ext = fmt
+                break
+        if ext is None:
+            logger.warning("保存图片失败: 非法文件格式 (前4字节: %s)", image_data[:4].hex())
+            return None
+
+        # 创建目录：/uploads/orders/{order_id}/nodes/{node_id}/
+        node_dir = f"{database.ORDER_UPLOAD_DIR}/{order_id}/nodes"
+        if node_id:
+            node_dir = f"{node_dir}/{node_id}"
+        os.makedirs(node_dir, exist_ok=True)
+
+        # 生成文件名
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        file_path = os.path.join(node_dir, f"{timestamp}.{ext}")
+
+        with open(file_path, 'wb') as f:
+            f.write(image_data)
+
+        # 返回相对于 uploads/ 的路径（不含 /uploads/ 前缀）
+        relative = f"orders/{order_id}/nodes"
+        if node_id:
+            relative = f"{relative}/{node_id}"
+        relative = f"{relative}/{os.path.basename(file_path)}"
+        return relative
+    except Exception as e:
+        logger.error("保存图片失败: %s", e)
+        return None
+
+# ========== 认证 ==========
+
+@console_bp.route('/auth/login', methods=['POST'])
+def staff_login():
+    """员工登录"""
+    data = request.get_json()
+    
+    # Pydantic 校验
+    try:
+        validated = StaffLogin(**data)
+    except ValidationError as e:
+        return jsonify({'success': False, 'message': f'参数校验失败: {e.errors()[0]["msg"]}'}), 400
+    
+    username = validated.username
+    password = validated.password
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 查找用户
+    cursor.execute('''
+        SELECT * FROM staff WHERE username = %s AND is_active = 1
+    ''', (username,))
+    staff = cursor.fetchone()
+
+    if not staff:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '用户名或密码错误'})
+
+    # 验证密码（支持 bcrypt + SHA256 双验证）
+    is_valid, needs_rehash = database.verify_password(password, staff['password_hash'])
+    if not is_valid:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '用户名或密码错误'})
+
+    # SHA256 密码升级为 bcrypt
+    if needs_rehash:
+        new_hash = database.hash_password(password)
+        cursor.execute('UPDATE staff SET password_hash = %s WHERE id = %s', (new_hash, staff['id']))
+
+    # 清理该staff所有过期token + 活跃旧token（防止token膨胀）
+    cursor.execute('DELETE FROM staff_tokens WHERE expires_at < NOW()')
+    cursor.execute('DELETE FROM staff_tokens WHERE staff_id = %s AND expires_at > NOW()', (staff['id'],))
+
+    # 生成新token
+    token = generate_token()
+    expires_at = datetime.now() + timedelta(hours=24)
+
+    cursor.execute('''
+        INSERT INTO staff_tokens (staff_id, token, expires_at)
+        VALUES (%s, %s, %s)
+    ''', (staff['id'], token, expires_at))
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'staff': {
+            'id': staff['id'],
+            'username': staff['username'],
+            'full_name': staff['full_name'],
+            'role': staff['role']
+        },
+        'token': token
+    })
+
+@console_bp.route('/auth/me', methods=['GET'])
+def get_me():
+    """获取当前员工信息"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    return jsonify({
+        'success': True,
+        'staff': {
+            'id': staff['id'],
+            'username': staff['username'],
+            'full_name': staff['full_name'],
+            'role': staff['role']
+        }
+    })
+
+@console_bp.route('/auth/password', methods=['PUT'])
+def change_password():
+    """修改密码"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    old_password = data.get('old_password', '')
+    new_password = data.get('new_password', '')
+
+    if not old_password or not new_password:
+        return jsonify({'success': False, 'message': '原密码和新密码不能为空'})
+
+    # 验证原密码（支持 bcrypt + SHA256 双验证）
+    is_valid, needs_rehash = database.verify_password(old_password, staff['password_hash'])
+    if not is_valid:
+        return jsonify({'success': False, 'message': '原密码错误'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    new_hash = database.hash_password(new_password)
+    cursor.execute('''
+        UPDATE staff SET password_hash = %s WHERE id = %s
+    ''', (new_hash, staff['id']))
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '密码修改成功'})
+
+# ========== 订单管理 ==========
+
+@console_bp.route('/orders', methods=['GET'])
+def get_orders():
+    """获取订单列表"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    status = request.args.get('status', '')
+    page = request.args.get('page', 1, type=int)
+    size = request.args.get('size', 20, type=int)
+    offset = (page - 1) * size
+    start_date = request.args.get('startDate', '')
+    end_date = request.args.get('endDate', '')
+    staff_id = request.args.get('staff_id', '', type=int) or None
+    product_type_id = request.args.get('product_type_id', '', type=int) or None
+    brand_id = request.args.get('brand_id', '', type=int) or None
+    model_id = request.args.get('model_id', '', type=int) or None
+    service_type_id = request.args.get('service_type_id', '', type=int) or None
+    keyword = request.args.get('keyword', '').strip()
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 构建 WHERE 子句
+    conditions = []
+    params = []
+    # 始终排除已删除订单
+    if status and status == 'deleted':
+        conditions.append("status = %s")
+        params.append('deleted')
+    else:
+        conditions.append("status != %s")
+        params.append('deleted')
+    if status:
+        if status == 'repairing':
+            conditions.append("status IN (%s, %s, %s)")
+            params.extend(['received', 'inspecting', 'repairing'])
+        else:
+            conditions.append("status = %s")
+            params.append(status)
+    if start_date:
+        conditions.append("o.created_at >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("o.created_at <= %s")
+        params.append(end_date + ' 23:59:59')
+    if staff_id:
+        conditions.append("o.assigned_staff_id = %s")
+        params.append(staff_id)
+    if keyword:
+        kw = f'%{keyword}%'
+        conditions.append("(o.order_no LIKE %s OR o.receiver_name LIKE %s OR o.receiver_phone LIKE %s)")
+        params.extend([kw, kw, kw])
+    # product_type_id / brand_id / model_id / service_type_id 通过子查询
+    if product_type_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE product_type_id = %s)")
+        params.append(product_type_id)
+    if brand_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE brand_id = %s)")
+        params.append(brand_id)
+    if model_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE model_id = %s)")
+        params.append(model_id)
+    if service_type_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE service_type_id = %s)")
+        params.append(service_type_id)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    # 获取总数
+    count_sql = "SELECT COUNT(*) as count FROM orders o " + where_clause
+    cursor.execute(count_sql, params)
+    total = cursor.fetchone()['count']
+
+    # 获取订单列表
+    list_sql = '''
+        SELECT o.*, c.nickname, c.phone as customer_phone,
+               s.full_name as assigned_staff_name, s.username as assigned_staff_username
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id = c.id
+        LEFT JOIN staff s ON o.assigned_staff_id = s.id
+        ''' + where_clause + '''
+        ORDER BY o.created_at DESC
+        LIMIT %s OFFSET %s
+    '''
+    cursor.execute(list_sql, params + [size, offset])
+
+    orders = []
+    for row in cursor.fetchall():
+        order = row
+        # 加急服务字段
+        order['urgent_service'] = bool(order.get('urgent_service', False))
+        order['urgent_fee'] = float(order.get('urgent_fee', 0) or 0)
+        # 接单技师信息
+        order['assigned_staff_name'] = order.get('assigned_staff_name') or order.get('assigned_staff_username') or ''
+        # 获取订单项
+        cursor.execute('''
+            SELECT oi.*, pt.name as product_type_name, b.name as brand_name,
+                   m.name as model_name, st.name as service_type_name
+            FROM order_items oi
+            LEFT JOIN product_types pt ON oi.product_type_id = pt.id
+            LEFT JOIN brands b ON oi.brand_id = b.id
+            LEFT JOIN models m ON oi.model_id = m.id
+            LEFT JOIN service_types st ON oi.service_type_id = st.id
+            WHERE oi.order_id = %s
+        ''', (order['id'],))
+        order['items'] = [r for r in cursor.fetchall()]
+        orders.append(order)
+
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'orders': orders,
+        'total': total,
+        'page': page,
+        'size': size
+    })
+
+@console_bp.route('/orders/<int:order_id>/release', methods=['POST'])
+def release_order(order_id):
+    """管理员强制释放订单（将已接单订单放回未接单状态）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff or staff.get('role') not in ('admin', 'super_admin'):
+        return jsonify({'success': False, 'message': '仅管理员可释放订单'}), 403
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM orders WHERE id = %s', (order_id,))
+    order = cursor.fetchone()
+    if not order:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'}), 404
+
+    # 只允许释放已分配技师的订单
+    if order['assigned_staff_id'] is None:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单未分配技师，无需释放'}), 400
+
+    # 只允许释放维修中的订单（pending/confirmed/paid/received/inspecting/repairing）
+    if order['status'] not in ('pending', 'confirmed', 'paid', 'received', 'inspecting', 'repairing'):
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': f'订单状态为{order["status"]}，无法释放'}), 400
+
+    cursor.execute(
+        "UPDATE orders SET assigned_staff_id = NULL, updated_at = NOW() WHERE id = %s",
+        (order_id,)
+    )
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '订单已释放，其他技师可重新接单'})
+
+
+@console_bp.route('/orders/<int:order_id>', methods=['DELETE'])
+def delete_order(order_id):
+    """软删除订单（仅管理员）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff or staff.get('role') not in ('admin', 'super_admin'):
+        return jsonify({'success': False, 'message': '仅管理员可删除订单'}), 403
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM orders WHERE id = %s', (order_id,))
+    order = cursor.fetchone()
+    if not order:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'}), 404
+
+    # 软删除
+    cursor.execute(
+        "UPDATE orders SET status = 'deleted', updated_at = NOW() WHERE id = %s",
+        (order_id,)
+    )
+    conn.commit()
+    database.release_connection(conn)
+
+    # 清理照片文件（非阻塞）
+    try:
+        from pdf_generator import cleanup_order_photos
+        cleanup_order_photos(order_id)
+    except Exception:
+        pass
+
+    return jsonify({'success': True, 'message': '订单已删除'})
+
+@console_bp.route('/orders/<int:order_id>', methods=['GET'])
+def get_order_detail(order_id):
+    """获取订单详情"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取订单信息
+    cursor.execute('''
+        SELECT o.*, c.nickname, c.name as customer_name, c.phone as customer_phone
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id = c.id
+        WHERE o.id = %s
+    ''', (order_id,))
+    order = cursor.fetchone()
+
+    if not order:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    order_dict = order
+    # 加急服务字段
+    order_dict['urgent_service'] = bool(order_dict.get('urgent_service', False))
+    order_dict['urgent_fee'] = float(order_dict.get('urgent_fee', 0) or 0)
+
+    # 获取订单项
+    cursor.execute('''
+        SELECT oi.*, pt.name as product_type_name, b.name as brand_name,
+               m.name as model_name, st.name as service_type_name
+        FROM order_items oi
+        LEFT JOIN product_types pt ON oi.product_type_id = pt.id
+        LEFT JOIN brands b ON oi.brand_id = b.id
+        LEFT JOIN models m ON oi.model_id = m.id
+        LEFT JOIN service_types st ON oi.service_type_id = st.id
+        WHERE oi.order_id = %s
+    ''', (order_id,))
+    order_dict['items'] = [r for r in cursor.fetchall()]
+
+    # 获取追踪节点（返回所有节点，不去重，前端需要显示所有照片）
+    cursor.execute('''
+        SELECT *
+        FROM tracking_nodes
+        WHERE order_id = %s
+        ORDER BY created_at ASC
+    ''', (order_id,))
+    all_nodes = [r for r in cursor.fetchall()]
+    # paid 与 created 同一步骤，优先保留 created（过滤掉 paid）
+    has_created = any(n['node_code'] == 'created' for n in all_nodes)
+    if has_created:
+        all_nodes = [n for n in all_nodes if n['node_code'] != 'paid']
+    order_dict['tracking_nodes'] = all_nodes
+
+    # 获取专项服务记录
+    cursor.execute('''
+        SELECT ssr.*, ss.name as preset_name
+        FROM special_service_records ssr
+        LEFT JOIN special_services ss ON ssr.special_service_id = ss.id
+        WHERE ssr.order_id = %s
+    ''', (order_id,))
+    order_dict['special_services'] = [r for r in cursor.fetchall()]
+
+    # PDF下载URL
+    if order_dict.get('pdf_path'):
+        order_dict['reportUrl'] = f'/selforder-api/console/orders/{order_id}/report-pdf'
+    else:
+        order_dict['reportUrl'] = None
+
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': order_dict})
+
+@console_bp.route('/orders/<int:order_id>/receive', methods=['PUT'])
+def receive_order(order_id):
+    """确认收货"""
+    try:
+        token = request.headers.get('X-Staff-Token', '')
+        staff = validate_staff_token(token)
+        if not staff:
+            return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+        data = request.get_json()
+        note = data.get('note', '')
+        photos_base64 = data.get('photos', [])
+        express_company = data.get('express_company', '')
+        express_no = data.get('express_no', '')
+        packaging_condition = data.get('packaging_condition', '完好')
+
+        conn = database.get_connection()
+        cursor = conn.cursor()
+
+        # 更新订单状态（只对非received状态更新）
+        cursor.execute('SELECT status FROM orders WHERE id = %s', (order_id,))
+        old_status = cursor.fetchone()['status'] if cursor.rowcount else None
+        cursor.execute('''
+            UPDATE orders
+            SET status = 'received', updated_at = NOW()
+            WHERE id = %s AND status NOT IN ('inspecting', 'repairing', 'ready', 'shipped', 'completed')
+        ''', (order_id,))
+        if cursor.rowcount > 0:
+            log_status_change(conn, order_id, 'status', old_status, 'received', staff['full_name'] or staff['username'])
+
+        if cursor.rowcount == 0:
+            # 可能是重复提交，检查是否有 received 节点（无节点=非法状态）
+            cursor.execute('SELECT id FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'received'))
+            if not cursor.fetchone():
+                database.release_connection(conn)
+                return jsonify({'success': False, 'message': '订单状态不正确或订单不存在'})
+            # 有节点=幂等重复提交，穿透继续执行（允许追加照片/更新文字）
+
+        # 保存快递信息（幂等更新）
+        if express_company or express_no:
+            cursor.execute('UPDATE orders SET express_company=%s, express_no=%s WHERE id=%s',
+                          (express_company, express_no, order_id))
+
+        # 检查是否已有 received 节点，有则更新，无则创建
+        desc = f'已收到客户寄送的设备（{packaging_condition}）'
+        if express_company:
+            desc = f'{express_company} {express_no}，{desc}'
+        cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'received'))
+        existing = cursor.fetchone()
+        if existing:
+            node_id = existing['id']
+            existing_photos = existing['photos'] or '[]'
+            try:
+                existing_photos = json.loads(existing_photos) if isinstance(existing_photos, str) else existing_photos
+            except:
+                existing_photos = []
+            cursor.execute('''
+                UPDATE tracking_nodes
+                SET description=%s, staff_id=%s, staff_name=%s, operate_time=NOW(), operate_note=%s
+                WHERE id=%s
+            ''', (desc, staff['id'], staff['full_name'] or staff['username'], note, node_id))
+        else:
+            existing_photos = []
+            cursor.execute('''
+                INSERT INTO tracking_nodes (
+                    order_id, node_code, node_name, description,
+                    staff_id, staff_name, operate_time, operate_note, photos
+                ) VALUES (%s, 'received', '确认收货', %s, %s, %s, NOW(), %s, '[]')
+                RETURNING id
+            ''', (order_id, desc, staff['id'], staff['full_name'] or staff['username'], note))
+            node_id = cursor.fetchone()['id']
+        conn.commit()
+
+        # 保存照片（传入正确的 node_id，路径自动为 orders/{order_id}/nodes/{node_id}/）
+        # 支持两种格式:
+        # 1. 新格式: [{type: 'unbox'|'unbox_opened', data: base64_string}]
+        # 2. 旧格式: [base64_string, base64_string]
+        photo_paths = list(existing_photos)
+        for item in photos_base64:
+            if isinstance(item, dict) and 'data' in item:
+                # 新格式：带 type 标签
+                path = save_base64_image(item['data'], order_id, node_id)
+                if path:
+                    photo_paths.append({'type': item.get('type', 'unknown'), 'path': path})
+            elif isinstance(item, str):
+                # 旧格式：纯 base64 字符串（向后兼容）
+                path = save_base64_image(item, order_id, node_id)
+                if path:
+                    photo_paths.append(path)
+
+        # 更新节点的 photos 字段（无论是否有新照片，都更新以保留原有照片）
+        cursor.execute('UPDATE tracking_nodes SET photos=%s WHERE id=%s',
+                      (json.dumps(photo_paths), node_id))
+        conn.commit()
+
+        _integration_hook_notify(conn, order_id, 'console', 'received')
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '确认收货成功'})
+    except Exception as e:
+        import traceback
+        logger.error("[ERROR] receive_order(%s): %s\n%s", order_id, e, traceback.format_exc())
+        return jsonify({'success': False, 'message': f'服务器错误: {str(e)}'}), 500
+
+@console_bp.route('/orders/<int:order_id>/inspect', methods=['PUT'])
+def inspect_order(order_id):
+    """拆件检验"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    photos_base64 = data.get('photos', [])
+    note = data.get('note', '')
+    operate_time = data.get('operate_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取当前订单状态
+    cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
+    order_row = cursor.fetchone()
+    if not order_row:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    current_status = order_row['status']
+    # 支持幂等：状态已超过 inspect 时才返回（inspect→repairing→ready→shipped→completed）
+    # 当前状态=inspecting 时允许穿透继续（追加照片/更新文字说明）
+    if current_status in ('repairing', 'ready', 'shipped', 'completed'):
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '拆件检验已完成', 'already_done': True})
+    if current_status not in ('received', 'pending', 'inspecting'):
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单状态不正确'})
+
+    # 更新订单状态
+    cursor.execute('''
+        UPDATE orders
+        SET status = 'inspecting', updated_at = NOW()
+        WHERE id = %s
+    ''', (order_id,))
+    log_status_change(conn, order_id, 'status', current_status, 'inspecting', staff['full_name'] or staff['username'])
+
+    # 检查是否已有 inspect 节点，有则更新，无则创建
+    cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'inspect'))
+    existing = cursor.fetchone()
+    if existing:
+        node_id = existing['id']
+        existing_photos = existing['photos'] or '[]'
+        try:
+            existing_photos = json.loads(existing_photos) if isinstance(existing_photos, str) else existing_photos
+        except:
+            existing_photos = []
+        cursor.execute('''
+            UPDATE tracking_nodes
+            SET description='对设备进行拆件检验', staff_id=%s, staff_name=%s, operate_time=%s, operate_note=%s
+            WHERE id=%s
+        ''', (staff['id'], staff['full_name'] or staff['username'], operate_time, note, node_id))
+    else:
+        existing_photos = []
+        cursor.execute('''
+            INSERT INTO tracking_nodes (
+                order_id, node_code, node_name, description,
+                staff_id, staff_name, operate_time, operate_note, photos
+            ) VALUES (%s, 'inspect', '拆件检验', '对设备进行拆件检验', %s, %s, %s, %s, '[]')
+            RETURNING id
+        ''', (order_id, staff['id'], staff['full_name'] or staff['username'],
+              operate_time, note))
+        node_id = cursor.fetchone()['id']
+    conn.commit()
+
+    # 保存照片到正确的节点目录
+    photo_paths = list(existing_photos)
+    for photo_b64 in photos_base64:
+        path = save_base64_image(photo_b64, order_id, node_id)
+        if path:
+            photo_paths.append(path)
+    if photo_paths:
+        cursor.execute('UPDATE tracking_nodes SET photos=%s WHERE id=%s',
+                      (json.dumps(photo_paths), node_id))
+        conn.commit()
+
+    _integration_hook_notify(conn, order_id, 'console', 'inspecting')
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '拆件检验记录已保存'})
+
+@console_bp.route('/service-items', methods=['GET'])
+def get_console_service_items():
+    """获取维修检项（按产品类型筛选，供维修技师使用）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    product_type_id = request.args.get('product_type_id', type=int)
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    if product_type_id:
+        cursor.execute('''
+            SELECT id, product_type_id, name, description, is_required, sort_order
+            FROM service_items
+            WHERE product_type_id = %s AND is_active = 1
+            ORDER BY sort_order
+        ''', (product_type_id,))
+    else:
+        cursor.execute('''
+            SELECT id, product_type_id, name, description, is_required, sort_order
+            FROM service_items
+            WHERE is_active = 1
+            ORDER BY product_type_id, sort_order
+        ''')
+
+    data = [row for row in cursor.fetchall()]
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': data})
+
+@console_bp.route('/orders/<int:order_id>/repair', methods=['PUT'])
+def repair_order(order_id):
+    """维修保养"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    photos_base64 = data.get('photos', [])
+    note = data.get('note', '')
+    selected_items = data.get('selected_items', [])  # 检项ID列表
+    operate_time = data.get('operate_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 构建包含检项的描述
+    description = '进行设备维修保养'
+    if selected_items:
+        cursor.execute('''
+            SELECT name FROM service_items WHERE id = ANY(%s) ORDER BY sort_order
+        ''', (selected_items,))
+        item_names = [row['name'] for row in cursor.fetchall()]
+        if item_names:
+            description = '维修检项：' + '、'.join(item_names)
+
+    # 获取当前订单状态
+    cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
+    order_row = cursor.fetchone()
+    if not order_row:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    current_status = order_row['status']
+    # 支持幂等：如果已经是 repairing 或之后状态，直接返回成功
+    if current_status in ('ready', 'shipped', 'completed'):
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '维修保养已完成', 'already_done': True})
+    if current_status not in ('inspecting', 'received', 'repairing'):
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单状态不正确'})
+
+    # 更新订单状态
+    cursor.execute('''
+        UPDATE orders
+        SET status = 'repairing', updated_at = NOW()
+        WHERE id = %s
+    ''', (order_id,))
+    log_status_change(conn, order_id, 'status', current_status, 'repairing', staff['full_name'] or staff['username'])
+
+    # 检查是否已有 repair 节点，有则更新，无则创建
+    cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'repair'))
+    existing = cursor.fetchone()
+    if existing:
+        node_id = existing['id']
+        # 保留原有图片
+        existing_photos = existing['photos'] or '[]'
+        try:
+            existing_photos = json.loads(existing_photos) if isinstance(existing_photos, str) else existing_photos
+        except:
+            existing_photos = []
+        cursor.execute('''
+            UPDATE tracking_nodes
+            SET description=%s, staff_id=%s, staff_name=%s, operate_time=%s, operate_note=%s
+            WHERE id=%s
+        ''', (description, staff['id'], staff['full_name'] or staff['username'], operate_time, note, node_id))
+    else:
+        existing_photos = []
+        cursor.execute('''
+            INSERT INTO tracking_nodes (
+                order_id, node_code, node_name, description,
+                staff_id, staff_name, operate_time, operate_note, photos
+            ) VALUES (%s, 'repair', '维修保养', %s, %s, %s, %s, %s, '[]')
+            RETURNING id
+        ''', (order_id, description, staff['id'], staff['full_name'] or staff['username'],
+              operate_time, note))
+        node_id = cursor.fetchone()['id']
+    conn.commit()
+
+    # 保存照片到正确的节点目录
+    photo_paths = list(existing_photos)  # 从原有图片开始
+    for photo_b64 in photos_base64:
+        path = save_base64_image(photo_b64, order_id, node_id)
+        if path:
+            photo_paths.append(path)
+    if photo_paths:
+        cursor.execute('UPDATE tracking_nodes SET photos=%s WHERE id=%s',
+                      (json.dumps(photo_paths), node_id))
+        conn.commit()
+
+    _integration_hook_notify(conn, order_id, 'console', 'repairing')
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '维修保养记录已保存'})
+
+@console_bp.route('/orders/<int:order_id>/special-service', methods=['POST'])
+def create_special_service(order_id):
+    """发起专项服务"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    order_item_id = data.get('order_item_id')
+    special_service_id = data.get('special_service_id')
+    price = data.get('price', 0)
+    description = data.get('description', '')
+    photos_base64 = data.get('photos', [])
+    staff_note = data.get('staff_note', '')
+    operate_time = data.get('operate_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    # 保存图片
+    photo_paths = []
+    for photo_b64 in photos_base64:
+        path = save_base64_image(photo_b64, order_id, 'special')
+        if path:
+            photo_paths.append(path)
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取名称：优先使用前端传入的name，否则从预设表获取
+    service_name = data.get('name', '')
+    if not service_name and special_service_id:
+        cursor.execute("SELECT name FROM special_services WHERE id = %s", (special_service_id,))
+        result = cursor.fetchone()
+        if result:
+            service_name = result['name']
+
+    quantity = data.get('quantity', 1)
+
+    # 创建专项服务记录
+    cursor.execute('''
+        INSERT INTO special_service_records (
+            order_id, order_item_id, special_service_id, name, description, price, quantity,
+            status, staff_photos, staff_note
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+        RETURNING id
+    ''', (order_id, order_item_id, special_service_id, service_name, description, price,
+          quantity, json.dumps(photo_paths), staff_note))
+
+    record_id = cursor.fetchone()['id']
+
+    # 添加追踪节点
+    cursor.execute('''
+        INSERT INTO tracking_nodes (
+            order_id, node_code, node_name, description,
+            staff_id, staff_name, operate_time, operate_note
+        ) VALUES (%s, 'special_service', '专项服务', %s, %s, %s, %s, %s)
+    ''', (order_id, f"发起专项服务: {service_name}",
+          staff['id'], staff['full_name'] or staff['username'], operate_time, staff_note))
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'record_id': record_id})
+
+@console_bp.route('/orders/<int:order_id>/special-service/<int:record_id>', methods=['PUT'])
+def update_special_service(order_id, record_id):
+    """更新专项服务状态"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 支持更新 name/price/quantity/status
+    set_parts = []
+    params = []
+
+    if 'name' in data:
+        set_parts.append(sql.SQL('{} = %s').format(sql.Identifier('name')))
+        params.append(data['name'])
+    if 'price' in data:
+        set_parts.append(sql.SQL('{} = %s').format(sql.Identifier('price')))
+        params.append(data['price'])
+    if 'quantity' in data:
+        set_parts.append(sql.SQL('{} = %s').format(sql.Identifier('quantity')))
+        params.append(data['quantity'])
+
+    status = data.get('status')
+    if status:
+        if status not in ['pending', 'confirmed', 'rejected', 'paid', 'completed']:
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '无效的状态'})
+        set_parts.append(sql.SQL('{} = %s').format(sql.Identifier('status')))
+        params.append(status)
+        if status == 'confirmed':
+            set_parts.append(sql.SQL('confirmed_at = NOW()'))
+        elif status == 'paid':
+            set_parts.append(sql.SQL('paid_at = NOW()'))
+
+    if not set_parts:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '无更新内容'})
+
+    params.extend([record_id, order_id])
+
+    cursor.execute(sql.SQL('''
+        UPDATE special_service_records
+        SET {}
+        WHERE id = %s AND order_id = %s
+    ''').format(sql.SQL(', ').join(set_parts)), params)
+
+    if cursor.rowcount == 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '记录不存在'})
+
+    # 添加追踪节点
+    status_map = {
+        'pending': '待确认',
+        'confirmed': '已确认',
+        'rejected': '已拒绝',
+        'paid': '已支付',
+        'completed': '已完成'
+    }
+
+    cursor.execute('''
+        INSERT INTO tracking_nodes (
+            order_id, node_code, node_name, description,
+            staff_id, staff_name, operate_time
+        ) VALUES (%s, 'special_update', '专项服务更新', %s, %s, %s, NOW())
+    ''', (order_id, f"专项服务状态更新为: {status_map.get(status, status)}",
+          staff['id'], staff['full_name'] or staff['username']))
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '状态更新成功'})
+
+@console_bp.route('/orders/<int:order_id>/qc', methods=['PUT'])
+def qc_order(order_id):
+    """QC通过，生成PDF（异步后台生成避免超时）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    photos_base64 = data.get('photos', [])
+    note = data.get('note', '')
+    operate_time = data.get('operate_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取订单信息
+    cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+    order = cursor.fetchone()
+
+    if not order:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    # 状态守卫：只有 repairing 状态才能 QC 通过变为 ready
+    # 支持幂等：如果已经是 ready 或之后状态，直接返回成功
+    if order['status'] in ('ready', 'shipped', 'completed'):
+        database.release_connection(conn)
+        return jsonify({'success': True, 'pdf_path': order.get('pdf_path', ''), 'message': '质检已通过', 'already_done': True})
+    if order['status'] != 'repairing':
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单状态不正确'})
+
+    order_dict = order
+    order_no = order_dict.get('order_no', 'UNKNOWN')
+    pdf_path = f"{database.PDF_DIR}/{order_no}.pdf"
+
+    # 先更新订单状态为 ready（PDF路径先设为空或占位）
+    cursor.execute('''
+        UPDATE orders
+        SET status = 'ready', pdf_path = %s, updated_at = NOW()
+        WHERE id = %s
+    ''', (pdf_path, order_id))
+    log_status_change(conn, order_id, 'status', order['status'], 'ready', staff['full_name'] or staff['username'])
+
+    # 检查是否已有 qc 节点，有则更新，无则创建
+    cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'qc'))
+    existing = cursor.fetchone()
+    if existing:
+        node_id = existing['id']
+        existing_photos = existing['photos'] or '[]'
+        try:
+            existing_photos = json.loads(existing_photos) if isinstance(existing_photos, str) else existing_photos
+        except:
+            existing_photos = []
+        cursor.execute('''
+            UPDATE tracking_nodes
+            SET description='设备质检通过，生成报告', staff_id=%s, staff_name=%s, operate_time=%s, operate_note=%s
+            WHERE id=%s
+        ''', (staff['id'], staff['full_name'] or staff['username'], operate_time, note, node_id))
+    else:
+        existing_photos = []
+        cursor.execute('''
+            INSERT INTO tracking_nodes (
+                order_id, node_code, node_name, description,
+                staff_id, staff_name, operate_time, operate_note, photos
+            ) VALUES (%s, 'qc', '质检通过', '设备质检通过，生成报告', %s, %s, %s, %s, '[]')
+            RETURNING id
+        ''', (order_id, staff['id'], staff['full_name'] or staff['username'],
+              operate_time, note))
+        node_id = cursor.fetchone()['id']
+    conn.commit()
+
+    # 保存照片到正确的节点目录
+    photo_paths = list(existing_photos)
+    for photo_b64 in photos_base64:
+        path = save_base64_image(photo_b64, order_id, node_id)
+        if path:
+            photo_paths.append(path)
+    if photo_paths:
+        cursor.execute('UPDATE tracking_nodes SET photos=%s WHERE id=%s',
+                      (json.dumps(photo_paths), node_id))
+        conn.commit()
+
+    database.release_connection(conn)
+
+    # 后台线程生成PDF（避免阻塞HTTP响应）
+    import threading
+    def generate_pdf_async():
+        try:
+            import pdf_generator
+            pdf_generator.generate_order_pdf(order_dict)
+        except Exception as e:
+            logger.error("PDF生成失败 order_id=%s: %s", order_id, e)
+
+    threading.Thread(target=generate_pdf_async, daemon=True).start()
+
+    return jsonify({'success': True, 'pdf_path': pdf_path, 'message': '质检通过，PDF生成中'})
+
+@console_bp.route('/orders/<int:order_id>/return-express', methods=['PUT'])
+def update_return_express(order_id):
+    """填写回寄快递信息"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json()
+    return_express_company = data.get('return_express_company', '')
+    return_express_no = data.get('return_express_no', '')
+
+    if not return_express_no:
+        return jsonify({'success': False, 'message': '快递单号不能为空'})
+    # 维修员寄件快递固定为顺丰
+    return_express_company = '顺丰速运'
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        UPDATE orders
+        SET return_express_company = %s, return_express_no = %s,
+            updated_at = NOW()
+        WHERE id = %s
+    ''', (return_express_company, return_express_no, order_id))
+
+    # 添加追踪节点
+    cursor.execute('''
+        INSERT INTO tracking_nodes (
+            order_id, node_code, node_name, description,
+            staff_id, staff_name, operate_time
+        ) VALUES (%s, 'return_express', '填写回寄', %s, %s, %s, NOW())
+    ''', (order_id, f"回寄快递: {return_express_company} {return_express_no}",
+          staff['id'], staff['full_name'] or staff['username']))
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '回寄信息已保存'})
+
+@console_bp.route('/orders/<int:order_id>/ship', methods=['PUT'])
+def ship_order(order_id):
+    """确认发出"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json() or {}
+    note = data.get('note', '')
+    photos_base64 = data.get('photos', [])
+    ship_company = data.get('return_express_company', '')
+    ship_no = data.get('return_express_no', '')
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取当前订单状态
+    cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
+    order_row = cursor.fetchone()
+    if not order_row:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    current_status = order_row['status']
+    # 支持幂等：如果已经是 shipped 或之后状态，直接返回成功
+    if current_status in ('completed',):
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '已发货', 'already_done': True})
+    if current_status not in ('ready', 'shipped'):
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单状态不正确'})
+
+    cursor.execute('''
+        UPDATE orders
+        SET status = 'shipped', updated_at = NOW()
+        WHERE id = %s
+    ''', (order_id,))
+    log_status_change(conn, order_id, 'status', current_status, 'shipped', staff['full_name'] or staff['username'])
+
+    # 更新回寄快递信息
+    if ship_company or ship_no:
+        cursor.execute('UPDATE orders SET return_express_company=%s, return_express_no=%s WHERE id=%s',
+                      (ship_company, ship_no, order_id))
+
+    # 构造描述
+    desc = '设备已寄出'
+    if ship_company:
+        desc = f'{ship_company} {ship_no}，{desc}'
+
+    # 检查是否已有 shipped 节点，有则更新，无则创建
+    cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'shipped'))
+    existing = cursor.fetchone()
+    if existing:
+        node_id = existing['id']
+        existing_photos = existing['photos'] or '[]'
+        try:
+            existing_photos = json.loads(existing_photos) if isinstance(existing_photos, str) else existing_photos
+        except:
+            existing_photos = []
+        cursor.execute('''
+            UPDATE tracking_nodes
+            SET description=%s, staff_id=%s, staff_name=%s, operate_time=NOW(), operate_note=%s
+            WHERE id=%s
+        ''', (desc, staff['id'], staff['full_name'] or staff['username'], note, node_id))
+    else:
+        existing_photos = []
+        cursor.execute('''
+            INSERT INTO tracking_nodes (
+                order_id, node_code, node_name, description,
+                staff_id, staff_name, operate_time, operate_note, photos
+            ) VALUES (%s, 'shipped', '回寄客户', %s, %s, %s, NOW(), %s, '[]')
+            RETURNING id
+        ''', (order_id, desc, staff['id'], staff['full_name'] or staff['username'], note))
+        node_id = cursor.fetchone()['id']
+    conn.commit()
+
+    # 保存照片
+    photo_paths = list(existing_photos)
+    for item in photos_base64:
+        if isinstance(item, dict) and 'data' in item:
+            path = save_base64_image(item['data'], order_id, node_id)
+            if path:
+                photo_paths.append({'type': item.get('type', 'ship'), 'path': path})
+        elif isinstance(item, str):
+            path = save_base64_image(item, order_id, node_id)
+            if path:
+                photo_paths.append(path)
+
+    if photo_paths:
+        cursor.execute('UPDATE tracking_nodes SET photos=%s WHERE id=%s',
+                      (json.dumps(photo_paths), node_id))
+        conn.commit()
+
+    _integration_hook_notify(conn, order_id, 'console', 'shipped',
+                             {'express': ship_company, 'tracking_no': ship_no})
+    database.release_connection(conn)
+    return jsonify({'success': True, 'message': '发货成功'})
+
+@console_bp.route('/orders/<int:order_id>/complete', methods=['PUT'])
+def complete_order(order_id):
+    """完成订单"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    data = request.get_json() or {}
+    note = data.get('note', '')
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 获取当前订单状态
+    cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
+    order_row = cursor.fetchone()
+    if not order_row:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'})
+
+    current_status = order_row['status']
+    # 支持幂等：如果已经是 completed，直接返回成功
+    if current_status == 'completed':
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '订单已完成', 'already_done': True})
+    if current_status != 'shipped':
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单状态不正确'})
+
+    cursor.execute('''
+        UPDATE orders
+        SET status = 'completed', completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+    ''', (order_id,))
+    log_status_change(conn, order_id, 'status', current_status, 'completed', staff['full_name'] or staff['username'])
+
+    # 添加追踪节点
+    cursor.execute('''
+        INSERT INTO tracking_nodes (
+            order_id, node_code, node_name, description,
+            staff_id, staff_name, operate_time, operate_note
+        ) VALUES (%s, 'completed', '订单完成', '订单已完成', %s, %s, NOW(), %s)
+    ''', (order_id, staff['id'], staff['full_name'] or staff['username'], note))
+
+    conn.commit()
+    _integration_hook_notify(conn, order_id, 'console', 'completed')
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': '订单已完成'})
+
+@console_bp.route('/orders/<int:order_id>/payment-status', methods=['PUT'])
+def update_payment_status(order_id):
+    """手动设置订单支付状态（管理员）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+    
+    # 仅管理员可操作
+    if staff.get('role') != 'admin':
+        return jsonify({'success': False, 'message': '仅管理员可设置支付状态'})
+
+    data = request.get_json() or {}
+    payment_status = data.get('payment_status')
+    
+    if payment_status not in ['unpaid', 'paid', 'refunded']:
+        return jsonify({'success': False, 'message': '无效的支付状态'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute('SELECT payment_status FROM orders WHERE id = %s', (order_id,))
+        old_ps = cursor.fetchone()['payment_status'] if cursor.rowcount else None
+        cursor.execute('''
+            UPDATE orders
+            SET payment_status = %s,
+                payment_time = CASE WHEN %s = 'paid' THEN NOW() ELSE payment_time END,
+                updated_at = NOW()
+            WHERE id = %s
+        ''', (payment_status, payment_status, order_id))
+
+        if cursor.rowcount == 0:
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '订单不存在'})
+        log_status_change(conn, order_id, 'payment_status', old_ps, payment_status, staff['full_name'] or staff['username'], 'admin')
+
+        # 添加追踪节点记录
+        status_text = {'unpaid': '未支付', 'paid': '已支付', 'refunded': '已退款'}.get(payment_status, payment_status)
+        cursor.execute('''
+            INSERT INTO tracking_nodes (
+                order_id, node_code, node_name, description,
+                staff_id, staff_name, operate_time
+            ) VALUES (%s, 'payment_update', '支付状态更新', %s, %s, %s, NOW())
+        ''', (order_id, f'管理员设置支付状态为：{status_text}', staff['id'], staff['full_name'] or staff['username']))
+
+        conn.commit()
+        database.release_connection(conn)
+
+        return jsonify({'success': True, 'message': f'支付状态已更新为：{status_text}'})
+    except Exception as e:
+        conn.rollback()
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': f'更新失败: {str(e)}'})
+
+# ========== 统计 ==========
+
+@console_bp.route('/dashboard/stats', methods=['GET'])
+def get_dashboard_stats():
+    """获取仪表盘统计数据"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    month_start = datetime.now().strftime('%Y-%m-01')
+
+    # 待处理订单数
+    cursor.execute("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'")
+    pending_count = cursor.fetchone()['count']
+
+    # 维修中订单数
+    cursor.execute("SELECT COUNT(*) as count FROM orders WHERE status IN ('received', 'inspecting', 'repairing')")
+    repairing_count = cursor.fetchone()['count']
+
+    # 今日订单数
+    cursor.execute("SELECT COUNT(*) as count FROM orders WHERE date(created_at) = %s AND status != 'deleted'", (today,))
+    today_orders = cursor.fetchone()['count']
+
+    # 本月收入
+    cursor.execute('''
+        SELECT COALESCE(SUM(total_amount), 0) as revenue
+        FROM orders
+        WHERE date(created_at) >= %s AND status NOT IN ('cancelled', 'deleted')
+    ''', (month_start,))
+    month_revenue = cursor.fetchone()['revenue']
+
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'pending_count': pending_count,
+            'repairing_count': repairing_count,
+            'today_orders': today_orders,
+            'month_revenue': month_revenue
+        }
+    })
+
+# ========== 节点照片管理 ==========
+
+@console_bp.route('/dashboard/report', methods=['GET'])
+def get_dashboard_report():
+    """获取统计报表数据"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或token已过期'})
+
+    start_date = request.args.get('startDate', '')
+    end_date = request.args.get('endDate', '')
+    product_type_id = request.args.get('product_type_id', '', type=int) or None
+    brand_id = request.args.get('brand_id', '', type=int) or None
+    model_id = request.args.get('model_id', '', type=int) or None
+    service_type_id = request.args.get('service_type_id', '', type=int) or None
+    customer_id = request.args.get('customer_id', '', type=int) or None
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 构建 WHERE 子句
+    conditions = ["status != 'deleted'"]
+    params = []
+    if start_date:
+        conditions.append("o.created_at >= %s")
+        params.append(start_date)
+    if end_date:
+        conditions.append("o.created_at <= %s")
+        params.append(end_date + ' 23:59:59')
+    if product_type_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE product_type_id = %s)")
+        params.append(product_type_id)
+    if brand_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE brand_id = %s)")
+        params.append(brand_id)
+    if model_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE model_id = %s)")
+        params.append(model_id)
+    if service_type_id:
+        conditions.append("o.id IN (SELECT DISTINCT order_id FROM order_items WHERE service_type_id = %s)")
+        params.append(service_type_id)
+    if customer_id:
+        conditions.append("o.customer_id = %s")
+        params.append(customer_id)
+    where = "WHERE " + " AND ".join(conditions)
+
+    # 子查询用的 WHERE（包含日期和客户筛选，不含 order_items 级联）
+    sub_where_conditions = ["o.status != 'deleted'"]
+    sub_where_params = []
+    if start_date:
+        sub_where_conditions.append("o.created_at >= %s")
+        sub_where_params.append(start_date)
+    if end_date:
+        sub_where_conditions.append("o.created_at <= %s")
+        sub_where_params.append(end_date + ' 23:59:59')
+    if customer_id:
+        sub_where_conditions.append("o.customer_id = %s")
+        sub_where_params.append(customer_id)
+    sub_where = "WHERE " + " AND ".join(sub_where_conditions)
+
+    # 级联筛选条件
+    # cascade_conditions_oi: 带表别名（用于 FROM order_items oi 的 breakdown 查询）
+    # cascade_conditions_plain: 不带别名（用于子查询 SELECT ... FROM order_items WHERE ...）
+    cascade_conditions_oi = []
+    cascade_conditions_plain = []
+    cascade_params = []
+    if product_type_id:
+        cascade_conditions_oi.append("oi.product_type_id = %s")
+        cascade_conditions_plain.append("product_type_id = %s")
+        cascade_params.append(product_type_id)
+    if brand_id:
+        cascade_conditions_oi.append("oi.brand_id = %s")
+        cascade_conditions_plain.append("brand_id = %s")
+        cascade_params.append(brand_id)
+    if model_id:
+        cascade_conditions_oi.append("oi.model_id = %s")
+        cascade_conditions_plain.append("model_id = %s")
+        cascade_params.append(model_id)
+    if service_type_id:
+        cascade_conditions_oi.append("oi.service_type_id = %s")
+        cascade_conditions_plain.append("service_type_id = %s")
+        cascade_params.append(service_type_id)
+
+    def build_oi_where():
+        """构建 order_items JOIN 过滤（带 oi. 别名，用于 breakdown 查询）"""
+        if cascade_conditions_oi:
+            return "AND oi.order_id IN (SELECT DISTINCT order_id FROM order_items WHERE " + " AND ".join(cascade_conditions_plain) + ")"
+        return ""
+
+    def build_sub_filter():
+        """构建子查询过滤（不带别名，用于 total/staff/monthly 等子查询）"""
+        if cascade_conditions_plain:
+            return " AND o.id IN (SELECT DISTINCT order_id FROM order_items WHERE " + " AND ".join(cascade_conditions_plain) + ")"
+        return ""
+
+    oi_filter = build_oi_where()
+    oi_params = cascade_params[:]  # cascade params for order_items subquery
+    # breakdown 查询参数 = sub_where 参数 + oi_filter 参数
+    breakdown_params = list(sub_where_params) + list(cascade_params)
+
+    # 总订单数和总收入（包含级联筛选）
+    total_where = where
+    total_params = list(params)
+    total_where += build_sub_filter()
+    total_params.extend(cascade_params)
+    cursor.execute("SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount), 0) as rev FROM orders o " + total_where, total_params)
+    row = cursor.fetchone()
+    total_orders = row['cnt']
+    total_revenue = row['rev']
+
+    # 状态分布（包含级联筛选）
+    cursor.execute("SELECT status, COUNT(*) as cnt FROM orders o " + total_where + " GROUP BY status", total_params)
+    status_breakdown = {r['status']: r['cnt'] for r in cursor.fetchall()}
+
+    # 已完成数（用于计算完成率）
+    completed_count = status_breakdown.get('completed', 0)
+
+    # 产品类型分布
+    pt_sql = '''
+        SELECT pt.name, COUNT(DISTINCT oi.order_id) as cnt, COALESCE(SUM(o.total_amount), 0) as rev
+        FROM order_items oi
+        LEFT JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN product_types pt ON oi.product_type_id = pt.id
+        ''' + sub_where + '\n        ' + oi_filter + '''
+        GROUP BY pt.name ORDER BY cnt DESC
+    '''
+    cursor.execute(pt_sql, breakdown_params)
+    product_type_breakdown = [{'name': r['name'] or '未分类', 'count': r['cnt'], 'revenue': round(r['rev'] or 0, 2)} for r in cursor.fetchall()]
+
+    # 品牌分布
+    brand_sql = '''
+        SELECT b.name, COUNT(DISTINCT oi.order_id) as cnt, COALESCE(SUM(o.total_amount), 0) as rev
+        FROM order_items oi
+        LEFT JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN brands b ON oi.brand_id = b.id
+        ''' + sub_where + '\n        ' + oi_filter + '''
+        GROUP BY b.name ORDER BY cnt DESC
+    '''
+    cursor.execute(brand_sql, breakdown_params)
+    brand_breakdown = [{'name': r['name'] or '未分类', 'count': r['cnt'], 'revenue': round(r['rev'] or 0, 2)} for r in cursor.fetchall()]
+
+    # 服务类型分布
+    st_sql = '''
+        SELECT st.name, COUNT(DISTINCT oi.order_id) as cnt, COALESCE(SUM(o.total_amount), 0) as rev
+        FROM order_items oi
+        LEFT JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN service_types st ON oi.service_type_id = st.id
+        ''' + sub_where + '\n        ' + oi_filter + '''
+        GROUP BY st.name ORDER BY cnt DESC
+    '''
+    cursor.execute(st_sql, breakdown_params)
+    service_type_breakdown = [{'name': r['name'] or '未分类', 'count': r['cnt'], 'revenue': round(r['rev'] or 0, 2)} for r in cursor.fetchall()]
+
+    # 技师业绩（按领取订单的技师 assigned_staff_id 统计）
+    staff_where = "WHERE o.status != 'deleted' AND o.assigned_staff_id IS NOT NULL"
+    staff_params = []
+    if start_date:
+        staff_where += " AND o.created_at >= %s"
+        staff_params.append(start_date)
+    if end_date:
+        staff_where += " AND o.created_at <= %s"
+        staff_params.append(end_date + ' 23:59:59')
+    if cascade_conditions_plain:
+        staff_where += " AND o.id IN (SELECT DISTINCT order_id FROM order_items WHERE " + " AND ".join(cascade_conditions_plain) + ")"
+        staff_params.extend(cascade_params)
+    if customer_id:
+        staff_where += " AND o.customer_id = %s"
+        staff_params.append(customer_id)
+    staff_sql = '''
+        SELECT COALESCE(s.full_name, '未分配') as name,
+               COUNT(o.id) as cnt,
+               COALESCE(SUM(o.total_amount), 0) as rev
+        FROM orders o
+        LEFT JOIN staff s ON o.assigned_staff_id = s.id
+        ''' + staff_where + '''
+        GROUP BY s.full_name ORDER BY rev DESC
+    '''
+    cursor.execute(staff_sql, staff_params)
+    staff_breakdown = [{'name': r['name'], 'count': r['cnt'], 'revenue': round(r['rev'] or 0, 2)} for r in cursor.fetchall()]
+
+    # 月度趋势（复用主 WHERE + 级联筛选）
+    monthly_where = where
+    monthly_params = list(params)
+    if cascade_conditions_plain:
+        monthly_where += " AND o.id IN (SELECT DISTINCT order_id FROM order_items WHERE " + " AND ".join(cascade_conditions_plain) + ")"
+        monthly_params.extend(cascade_params)
+    if customer_id:
+        monthly_where += " AND o.customer_id = %s"
+        monthly_params.append(customer_id)
+    monthly_sql = '''
+        SELECT TO_CHAR(o.created_at, 'YYYY-MM') as month,
+               COUNT(*) as cnt, COALESCE(SUM(total_amount), 0) as rev
+        FROM orders o
+        ''' + monthly_where + '''
+        GROUP BY month ORDER BY month DESC
+    '''
+    cursor.execute(monthly_sql, monthly_params)
+    monthly_trend = [{'month': r['month'], 'count': r['cnt'], 'revenue': round(r['rev'] or 0, 2)} for r in cursor.fetchall()]
+
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'total_orders': total_orders,
+            'total_revenue': round(total_revenue, 2),
+            'avg_order_value': round(total_revenue / total_orders, 2) if total_orders > 0 else 0,
+            'completion_rate': round(completed_count / total_orders * 100, 1) if total_orders > 0 else 0,
+            'status_breakdown': status_breakdown,
+            'product_type_breakdown': product_type_breakdown,
+            'brand_breakdown': brand_breakdown,
+            'service_type_breakdown': service_type_breakdown,
+            'staff_breakdown': staff_breakdown,
+            'monthly_trend': monthly_trend
+        }
+    })
+
+@console_bp.route('/orders/<int:order_id>/nodes/<int:node_id>/photo', methods=['POST'])
+def upload_node_photo(order_id, node_id):
+    """上传节点照片（维修员操作）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或无权限'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 验证节点属于该订单
+    cursor.execute('SELECT id, photos FROM tracking_nodes WHERE id = %s AND order_id = %s', (node_id, order_id))
+    node = cursor.fetchone()
+    if not node:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '节点不存在'}), 404
+
+    # 处理上传的文件
+    if 'photos' not in request.files:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '请上传照片'}), 400
+
+    files = request.files.getlist('photos')
+    if not files:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '请选择至少一张照片'}), 400
+
+    # 保存目录
+    photo_dir = f'{database.ORDER_UPLOAD_DIR}/{order_id}/nodes/{node_id}'
+    os.makedirs(photo_dir, exist_ok=True)
+
+    # 解析现有photos JSON
+    try:
+        existing_photos = json.loads(node['photos']) if node['photos'] else []
+    except (json.JSONDecodeError, TypeError, ValueError):
+        existing_photos = []
+
+    import uuid
+    MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB per file
+    saved_files = []
+    for f in files[:9]:  # 最多9张
+        if not f.filename:
+            continue
+        # 文件大小限制
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(0)
+        if size > MAX_FILE_SIZE:
+            continue
+        ext = os.path.splitext(f.filename)[1].lower()
+        if ext not in ('.jpg', '.jpeg', '.png', '.webp'):
+            continue
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+        filepath = os.path.join(photo_dir, filename)
+        f.save(filepath)
+        saved_files.append(filename)
+        existing_photos.append(filename)
+
+    if not saved_files:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '没有有效的图片文件'}), 400
+
+    # 更新数据库
+    cursor.execute('UPDATE tracking_nodes SET photos = %s WHERE id = %s',
+                   (json.dumps(existing_photos, ensure_ascii=False), node_id))
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'node_id': node_id,
+            'added': len(saved_files),
+            'photos': existing_photos
+        }
+    })
+
+@console_bp.route('/orders/<int:order_id>/nodes/<int:node_id>/photo/<filename>', methods=['GET'])
+def get_node_photo(order_id, node_id, filename):
+    """获取节点照片"""
+    token = request.headers.get('X-Staff-Token', '') or request.args.get('token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    # 数据库存储路径: orders/{order_id}/nodes/{node_id}/{filename}
+    # 相对于 UPLOAD_DIR，所以完整路径是 UPLOAD_DIR + 数据库存储路径
+    filepath = f'{database.UPLOAD_DIR}/orders/{order_id}/nodes/{node_id}/{filename}'
+    if not os.path.exists(filepath):
+        return jsonify({'success': False, 'message': '照片不存在'}), 404
+
+    return send_file(filepath)
+
+@console_bp.route('/orders/<int:order_id>/generate-report', methods=['POST'])
+def generate_report(order_id):
+    """手动生成维修报告PDF"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录或无权限'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM orders WHERE id = %s', (order_id,))
+    order = cursor.fetchone()
+    if not order:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '订单不存在'}), 404
+
+    from pdf_generator import generate_order_pdf
+    pdf_path = generate_order_pdf(order)
+    database.release_connection(conn)
+
+    if pdf_path:
+        return jsonify({'success': True, 'data': {'pdf_path': pdf_path}})
+    else:
+        return jsonify({'success': False, 'message': 'PDF生成失败'}), 500
+
+@console_bp.route('/orders/<int:order_id>/report-pdf', methods=['GET'])
+def get_report_pdf(order_id):
+    """管理员查看/下载报告PDF"""
+    token = request.headers.get('X-Staff-Token', '') or request.args.get('token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT pdf_path, order_no FROM orders WHERE id = %s', (order_id,))
+    order = cursor.fetchone()
+    database.release_connection(conn)
+
+    if not order or not order['pdf_path']:
+        return jsonify({'success': False, 'message': '报告未生成'}), 404
+
+    if not os.path.exists(order['pdf_path']):
+        return jsonify({'success': False, 'message': '报告文件已归档，请联系管理员'}), 410
+
+    # 支持预览(inline)和下载(attachment)两种模式
+    as_download = request.args.get('download', '0') == '1'
+    response = send_file(
+        order['pdf_path'],
+        as_attachment=as_download,
+        download_name=f"{order['order_no']}.pdf" if as_download else None,
+        mimetype='application/pdf'
+    )
+    # 添加响应头防止 Cloudflare 缓存/优化
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Content-Length'] = str(os.path.getsize(order['pdf_path']))
+    return response
+
+# ========== 模拟流程 ==========
+
+@console_bp.route('/simulate/create', methods=['POST'])
+def simulate_create_order():
+    """创建模拟订单"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff or staff['role'] not in ('admin', 'technician'):
+        return jsonify({'success': False, 'message': '仅管理员可模拟'}), 403
+
+    data = request.get_json() or {}
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 创建模拟客户
+    cursor.execute("""
+        INSERT INTO customers (openid, nickname, name, phone, address)
+        VALUES ('sim_' || %s, '模拟客户', '模拟客户', '00000000000', '模拟地址')
+        RETURNING id
+    """, (secrets.token_hex(4),))
+    customer_id = cursor.fetchone()['id']
+
+    # 创建模拟订单
+    import time
+    order_no = f"SIM-{time.strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
+    cursor.execute("INSERT INTO orders (order_no, customer_id, status, payment_status, total_amount, delivery_type, is_simulation, receiver_name, receiver_phone, receiver_address, created_at, updated_at) VALUES (%s, %s, 'confirmed', 'paid', 200, 'express', 1, '模拟客户', '13800138000', '模拟广州市天河区', NOW(), NOW()) RETURNING id", (order_no, customer_id))
+    order_id = cursor.fetchone()['id']
+
+    # 创建初始tracking node
+    cursor.execute("""
+        INSERT INTO tracking_nodes (order_id, node_code, node_name, description, operate_time, created_at)
+        VALUES (%s, 'created', '订单确认', '模拟客户提交订单',
+                NOW(), NOW())
+    """, (order_id,))
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({
+        'success': True,
+        'data': {'order_id': order_id, 'order_no': order_no, 'customer_id': customer_id}
+    })
+
+@console_bp.route('/simulate/<int:order_id>/step/<step>', methods=['POST'])
+def simulate_step(order_id, step):
+    """执行模拟流程步骤"""
+    token = request.headers.get('X-Staff-Token', '') or request.args.get('token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute('SELECT * FROM orders WHERE id = %s AND is_simulation = 1', (order_id,))
+        order = cursor.fetchone()
+        if not order:
+            return {'success': False, 'message': '模拟订单不存在'}, 404
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        staff_name = staff.get('full_name') or staff.get('username', '管理员')
+        sample_photo = os.path.join(database.UPLOAD_DIR, 'test', 'sample_photo.jpg')
+        photo_dir = f'{database.ORDER_UPLOAD_DIR}/{order_id}'
+        # 统一获取请求体（所有步骤都用到）
+        item_data = request.get_json() or {}
+
+        steps_map = {
+            'create': {'status': 'confirmed', 'node_code': 'paid',
+                       'node_name': '订单确认',
+                       'description': '订单确认'},
+            'pay':    {'status': 'confirmed', 'node_code': 'paid',
+                       'node_name': '订单确认',
+                       'description': '确认收货'},
+            'receive':{'status': 'received', 'node_code': 'received',
+                       'node_name': '确认收货',
+                       'description': '拆开邮包后拍照记录包装状态'},
+            'inspect':{'status': 'inspecting', 'node_code': 'inspect',
+                       'node_name': '拆件检验',
+                       'description': '设备拆解后、维修保养前状态记录'},
+            'repair': {'status': 'repairing', 'node_code': 'repair',
+                       'node_name': '维修保养',
+                       'description': '进行设备维修保养操作'},
+            'qc':     {'status': 'ready', 'node_code': 'qc',
+                       'node_name': '质检通过',
+                       'description': '设备质检通过，所有项目达标'},
+            'ship':   {'status': 'shipped', 'node_code': 'shipped',
+                       'node_name': '回寄客户',
+                       'description': '已打包发出'},
+            'complete':{'status': 'completed', 'node_code': 'completed',
+                       'node_name': '订单完成',
+                       'description': '客户已签收，订单完成'},
+        }
+
+        if step not in steps_map:
+            return {'success': False, 'message': f'未知步骤: {step}'}, 400
+
+        step_info = steps_map[step]
+        params = [step_info['status'], now]
+        update_sql = "UPDATE orders SET status = %s, updated_at = %s"
+
+        if step in ('pay', 'create'):
+            update_sql += ", payment_status = 'paid', payment_time = %s"
+            params.append(now)
+            item_data = request.get_json() or {}
+            # 交付方式
+            delivery_type = item_data.get('delivery_type', 'express')
+            if delivery_type:
+                cursor.execute('UPDATE orders SET delivery_type = %s WHERE id = %s', (delivery_type, order_id))
+                if delivery_type == 'store':
+                    step_info['description'] = '自行到店交付'
+                else:
+                    step_info['description'] = '快递寄送'
+            if item_data.get('product_type_id'):
+                pt_id = item_data.get('product_type_id')
+                brand_id = item_data.get('brand_id') or None
+                model_id = item_data.get('model_id') or None
+                svc_id = item_data.get('service_type_id') or None
+                price = 200.0
+                if svc_id:
+                    cursor.execute('SELECT base_price FROM service_types WHERE id = %s', (svc_id,))
+                    r = cursor.fetchone()
+                    if r and r['base_price']: price = float(r['base_price'])
+                cursor.execute("""
+                    INSERT INTO order_items (order_id, product_type_id, brand_id, model_id,
+                                          service_type_id, quantity, item_price, created_at)
+                    VALUES (%s, %s, %s, %s, %s, 1, %s, NOW())
+                """, (order_id, pt_id, brand_id, model_id, svc_id, price))
+                cursor.execute('UPDATE orders SET total_amount = %s WHERE id = %s', (price, order_id))
+
+        if step == 'receive':
+            item_data = request.get_json() or {}
+            express_company = item_data.get('express_company', '')
+            express_no = item_data.get('express_no', '')
+            packaging_condition = item_data.get('packaging_condition', '完好')  # 完好/破损
+            if express_company or express_no:
+                cursor.execute('UPDATE orders SET express_company = %s, express_no = %s WHERE id = %s',
+                             (express_company, express_no, order_id))
+                # 回填paid(确认收货)节点描述，加入快递信息
+                desc_parts = ['确认收货']
+                if express_company:
+                    desc_parts.append(express_company)
+                if express_no:
+                    desc_parts.append(f"单号:{express_no}")
+                cursor.execute("UPDATE tracking_nodes SET description = %s WHERE order_id = %s AND node_code = 'paid'",
+                             (' '.join(desc_parts), order_id))
+
+        if step == 'ship':
+            item_data = request.get_json() or {}
+            ret_company = item_data.get('return_express_company', '')
+            ret_no = item_data.get('return_express_no', '')
+            if ret_company or ret_no:
+                cursor.execute('UPDATE orders SET return_express_company = %s, return_express_no = %s WHERE id = %s',
+                             (ret_company, ret_no, order_id))
+
+        if step == 'complete':
+            update_sql += ", completed_at = %s"
+            params.append(now)
+
+        update_sql += " WHERE id = %s"
+        params.append(order_id)
+        cursor.execute(update_sql, params)
+
+        # 使用前端传来的备注，否则用默认描述
+        description = item_data.get('note', step_info['description']) or step_info['description']
+
+        # 先插入节点（获取node_id），再保存照片
+        cursor.execute("""
+            INSERT INTO tracking_nodes (order_id, node_code, node_name, description,
+                                      staff_id, staff_name, operate_time, photos, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, '[]', %s)
+            RETURNING id
+        """, (order_id, step_info['node_code'], step_info['node_name'],
+              description, staff['id'], staff_name, now, now))
+        new_node_id = cursor.fetchone()['id']
+
+        # 保存照片到 nodes/{node_id}/ 目录（PDF从这个路径读取）
+        node_photos = '[]'
+        incoming_photos = item_data.get('photos', [])
+        # receive步骤额外处理unbox照片
+        unbox_photos = item_data.get('unbox_photos', [])
+        if step == 'receive' and unbox_photos:
+            incoming_photos = incoming_photos + unbox_photos  # 合并未拆邮包+拆邮包照片
+        if incoming_photos and step not in ('pay', 'create', 'complete'):
+            photos_list = []
+            node_dir = os.path.join(photo_dir, 'nodes', str(new_node_id))
+            os.makedirs(node_dir, exist_ok=True)
+            import base64
+            for i, photo_data in enumerate(incoming_photos[:5]):
+                if photo_data and photo_data.startswith('data:'):
+                    photo_b64 = photo_data.split(',')[1] if ',' in photo_data else photo_data
+                    fname = f'{step}_{i+1}.jpg'
+                    try:
+                        img_data = base64.b64decode(photo_b64)
+                        dest = os.path.join(node_dir, fname)
+                        with open(dest, 'wb') as f:
+                            f.write(img_data)
+                        photos_list.append(fname)
+                    except Exception:
+                        pass
+            if photos_list:
+                node_photos = json.dumps(photos_list)
+                cursor.execute("UPDATE tracking_nodes SET photos = %s WHERE id = %s",
+                             (node_photos, new_node_id))
+
+        conn.commit()
+
+        # PDF在commit之后生成，确保新连接能看到所有已提交的节点
+        # QC时生成初版，complete时生成最终版（包含全部8步）
+        pdf_path = None
+        if step in ('qc', 'complete'):
+            import database as _db
+            conn2 = _db.get_connection()
+            cursor2 = conn2.cursor()
+            try:
+                cursor2.execute('SELECT * FROM orders WHERE id = %s', (order_id,))
+                updated_order = cursor2.fetchone()
+                from pdf_generator import generate_order_pdf
+                pdf_path = generate_order_pdf(updated_order, staff_name=staff_name)
+                if pdf_path:
+                    cursor2.execute('UPDATE orders SET pdf_path = %s WHERE id = %s', (pdf_path, order_id))
+                    conn2.commit()
+            finally:
+                database.release_connection(conn2)
+
+        return {'success': True,
+                'data': {'step': step, 'status': step_info['status'], 'node_id': new_node_id, 'pdf_path': pdf_path}}, 200
+
+    except Exception as e:
+        conn.rollback()
+        import traceback
+        traceback.print_exc()
+        return {'success': False, 'message': f'服务器内部错误: {e}'}, 500
+    finally:
+        database.release_connection(conn)
+
+
+@console_bp.route('/simulate/cleanup', methods=['POST'])
+def simulate_cleanup():
+    """清理所有模拟订单"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff or staff['role'] != 'admin':
+        return jsonify({'success': False, 'message': '仅管理员可清理'}), 403
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+
+    # 找模拟订单
+    cursor.execute('SELECT id FROM orders WHERE is_simulation = 1')
+    sim_orders = [r['id'] for r in cursor.fetchall()]
+
+    if not sim_orders:
+        database.release_connection(conn)
+        return jsonify({'success': True, 'message': '无模拟订单需清理'})
+
+    cleaned = 0
+    for oid in sim_orders:
+        # 删除tracking nodes
+        cursor.execute('DELETE FROM tracking_nodes WHERE order_id = %s', (oid,))
+        # 删除order items
+        cursor.execute('DELETE FROM order_items WHERE order_id = %s', (oid,))
+        # 删除special service records
+        cursor.execute('DELETE FROM special_service_records WHERE order_id = %s', (oid,))
+        # 删除订单
+        cursor.execute('DELETE FROM orders WHERE id = %s', (oid,))
+        # 删除照片目录
+        photo_dir = f'{database.ORDER_UPLOAD_DIR}/{oid}'
+        if os.path.exists(photo_dir):
+            import shutil
+            shutil.rmtree(photo_dir, ignore_errors=True)
+        cleaned += 1
+
+    conn.commit()
+    database.release_connection(conn)
+
+    return jsonify({'success': True, 'message': f'已清理{cleaned}个模拟订单'})
+
+
+# ========== 技术员专用端点 ==========
+
+@console_bp.route('/tech/orders', methods=['GET'])
+def tech_orders():
+    """技术员获取自己的订单列表（分新订单和我的订单）"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    try:
+        cursor = conn.cursor()
+        # 我的订单：已分配给我的、或我有操作记录的
+        cursor.execute('''
+            SELECT DISTINCT o.* FROM orders o
+            WHERE o.is_simulation = 0
+            AND o.status != 'deleted'
+            AND (o.assigned_staff_id = %s
+                 OR EXISTS (SELECT 1 FROM tracking_nodes tn
+                            WHERE tn.order_id = o.id AND tn.staff_id = %s))
+            ORDER BY o.created_at DESC
+        ''', (staff['id'], staff['id']))
+        my_orders = [{**r, 'is_mine': True} for r in cursor.fetchall()]
+        # 新订单：待认领（pending 或 confirmed 且未分配）
+        cursor.execute('''
+            SELECT * FROM orders
+            WHERE is_simulation = 0 AND status IN ('pending', 'confirmed')
+            AND assigned_staff_id IS NULL ORDER BY created_at DESC
+        ''')
+        new_orders = [{**r, 'is_mine': False} for r in cursor.fetchall()]
+        return jsonify({'success': True, 'data': {
+            'my_orders': my_orders,
+            'new_orders': new_orders,
+            'total': len(my_orders) + len(new_orders)
+        }})
+    finally:
+        database.release_connection(conn)
+
+
+
+@console_bp.route('/tech/orders/<int:order_id>/accept', methods=['POST'])
+def tech_accept_order(order_id):
+    """技术员认领订单"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM orders WHERE id = %s AND is_simulation = 0', (order_id,))
+        order = cursor.fetchone()
+        if not order:
+            return jsonify({'success': False, 'message': '订单不存在'}), 404
+        if order['assigned_staff_id'] is not None and order['assigned_staff_id'] != staff['id']:
+            return jsonify({'success': False, 'message': '此订单已被其他技术员认领'}), 400
+        # 已领取的订单，直接返回继续处理
+        if order['assigned_staff_id'] == staff['id']:
+            return jsonify({'success': True, 'message': '这是您的订单，继续处理'})
+        # 只允许 paid/confirmed/pending 状态的订单被领取
+        if order['status'] not in ('paid', 'confirmed', 'pending'):
+            return jsonify({'success': False, 'message': '订单状态为' + order['status'] + '，无法接单'}), 400
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 只分配技师，不改状态、不创建节点（节点由TechWorkflow提交时创建）
+        cursor.execute('UPDATE orders SET assigned_staff_id=%s, updated_at=%s WHERE id=%s',
+                      (staff['id'], now, order_id))
+        conn.commit()
+        return jsonify({'success': True, 'message': '接单成功'})
+    finally:
+        database.release_connection(conn)
+
+
+
+@console_bp.route('/orders/<int:order_id>/nodes/<int:node_id>/photo/<filename>', methods=['DELETE'])
+def delete_node_photo(order_id, node_id, filename):
+    """删除节点照片"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM tracking_nodes WHERE id = %s AND order_id = %s', (node_id, order_id))
+        node = cursor.fetchone()
+        if not node:
+            return jsonify({'success': False, 'message': '节点不存在'}), 404
+
+        photos = json.loads(node['photos'] or '[]')
+        
+        # 支持两种格式:
+        # 1. 新格式: [{type: 'unbox', path: 'orders/.../file.jpg'}]
+        # 2. 旧格式: ['orders/.../file.jpg']
+        photo_to_delete = None
+        for item in photos:
+            if isinstance(item, dict) and item.get('path', '').endswith(filename):
+                photo_to_delete = item
+                break
+            elif isinstance(item, str) and item.endswith(filename):
+                photo_to_delete = item
+                break
+        
+        if not photo_to_delete:
+            return jsonify({'success': False, 'message': '照片不存在'}), 404
+
+        # 删除文件
+        file_path = os.path.join(database.UPLOAD_DIR, photo_to_delete['path'] if isinstance(photo_to_delete, dict) else photo_to_delete)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        # 从列表移除
+        photos.remove(photo_to_delete)
+        cursor.execute('UPDATE tracking_nodes SET photos = %s WHERE id = %s', (json.dumps(photos), node_id))
+        conn.commit()
+        return jsonify({'success': True, 'message': '照片已删除'})
+    finally:
+        database.release_connection(conn)
+
+
+# ========== 设备检测数据 ==========
+
+@console_bp.route('/orders/<int:order_id>/equipment-data', methods=['GET'])
+def get_equipment_data(order_id):
+    """获取订单的设备检测数据"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    # 获取订单的所有 order_items
+    cursor.execute('''
+        SELECT oi.id as order_item_id, oi.quantity, 
+               pt.name as product_type_name, b.name as brand_name, m.name as model_name
+        FROM order_items oi
+        LEFT JOIN product_types pt ON oi.product_type_id = pt.id
+        LEFT JOIN brands b ON oi.brand_id = b.id
+        LEFT JOIN models m ON oi.model_id = m.id
+        WHERE oi.order_id = %s
+    ''', (order_id,))
+    items = cursor.fetchall()
+    
+    result = []
+    for item in items:
+        # 获取每个 order_item 的检测数据
+        cursor.execute('''
+            SELECT * FROM equipment_inspection_data
+            WHERE order_item_id = %s
+        ''', (item['order_item_id'],))
+        data = cursor.fetchone()
+        
+        result.append({
+            'order_item_id': item['order_item_id'],
+            'product_type_name': item['product_type_name'],
+            'brand_name': item['brand_name'],
+            'model_name': item['model_name'],
+            'quantity': item['quantity'],
+            'inspection_data': {
+                'id': data['id'] if data else None,
+                'first_stage_count': data['first_stage_count'] if data else 1,
+                'first_stage_serials': data['first_stage_serials'] if data else [],
+                'first_stage_pre_pressure': data['first_stage_pre_pressure'] if data else [],
+                'first_stage_post_pressure': data['first_stage_post_pressure'] if data else [],
+                'second_stage_count': data['second_stage_count'] if data else 1,
+                'second_stage_serials': data['second_stage_serials'] if data else [],
+                'second_stage_pre_resistance': data['second_stage_pre_resistance'] if data else [],
+                'second_stage_post_resistance': data['second_stage_post_resistance'] if data else [],
+                'staff_name': data['staff_name'] if data else None,
+                'created_at': data['created_at'].isoformat() if data and data['created_at'] else None,
+            } if data else None
+        })
+    
+    database.release_connection(conn)
+    return jsonify({'success': True, 'data': result})
+
+
+@console_bp.route('/orders/<int:order_id>/equipment-data', methods=['POST', 'PUT'])
+def save_equipment_data(order_id):
+    """保存/更新设备检测数据"""
+    token = request.headers.get('X-Staff-Token', '')
+    staff = validate_staff_token(token)
+    if not staff:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+
+    data = request.get_json() or {}
+    items_data = data.get('items', [])
+    
+    if not items_data:
+        return jsonify({'success': False, 'message': '无数据'}), 400
+
+    conn = database.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        for item in items_data:
+            order_item_id = item.get('order_item_id')
+            inspection = item.get('inspection_data', {})
+            
+            # 数据类型映射（按数据库字段类型）
+            # 所有数组字段均为 text[]：first_stage_pre_pressure / first_stage_post_pressure /
+            # second_stage_pre_resistance / second_stage_post_resistance / first_stage_serials / second_stage_serials
+            # → 传 Python list[str]，不做类型转换，允许任意文本（含范围值、中文、符号等）
+            def clean_text_array(arr):
+                """text[]: 保留空值占位（确保数组长度与count对应），空列表传 None"""
+                if not arr:
+                    return None
+                result = []
+                for x in arr:
+                    if x is None or x == '':
+                        result.append(None)
+                    else:
+                        result.append(str(x).strip())
+                return result if result else None
+            
+            # 显式None检查，避免0被当作falsy处理
+            fs_count_raw = inspection.get('first_stage_count')
+            fs_count = fs_count_raw if fs_count_raw is not None else 1
+            ss_count_raw = inspection.get('second_stage_count')
+            ss_count = ss_count_raw if ss_count_raw is not None else 1
+            
+            fs_pre   = clean_text_array(inspection.get('first_stage_pre_pressure', []))
+            fs_post  = clean_text_array(inspection.get('first_stage_post_pressure', []))
+            ss_pre   = clean_text_array(inspection.get('second_stage_pre_resistance', []))
+            ss_post  = clean_text_array(inspection.get('second_stage_post_resistance', []))
+            fs_ser   = clean_text_array(inspection.get('first_stage_serials', []))
+            ss_ser   = clean_text_array(inspection.get('second_stage_serials', []))
+            
+            cursor.execute('SELECT id FROM equipment_inspection_data WHERE order_item_id = %s', (order_item_id,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                cursor.execute('''
+                    UPDATE equipment_inspection_data SET
+                        first_stage_count = %s,
+                        first_stage_serials = %s,
+                        first_stage_pre_pressure = %s,
+                        first_stage_post_pressure = %s,
+                        second_stage_count = %s,
+                        second_stage_serials = %s,
+                        second_stage_pre_resistance = %s,
+                        second_stage_post_resistance = %s,
+                        updated_at = NOW(),
+                        staff_id = %s,
+                        staff_name = %s
+                    WHERE order_item_id = %s
+                ''', (
+                    fs_count, fs_ser,
+                    fs_pre, fs_post,
+                    ss_count, ss_ser,
+                    ss_pre, ss_post,
+                    staff['id'],
+                    staff['full_name'] or staff['username'],
+                    order_item_id
+                ))
+            else:
+                cursor.execute('''
+                    INSERT INTO equipment_inspection_data (
+                        order_item_id, order_id,
+                        first_stage_count, first_stage_serials,
+                        first_stage_pre_pressure, first_stage_post_pressure,
+                        second_stage_count, second_stage_serials,
+                        second_stage_pre_resistance, second_stage_post_resistance,
+                        staff_id, staff_name
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (
+                    order_item_id, order_id,
+                    fs_count, fs_ser,
+                    fs_pre, fs_post,
+                    ss_count, ss_ser,
+                    ss_pre, ss_post,
+                    staff['id'],
+                    staff['full_name'] or staff['username']
+                ))
+        
+        conn.commit()
+        return jsonify({'success': True, 'message': '保存成功'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'保存失败: {str(e)}'}), 500
+    finally:
+        database.release_connection(conn)

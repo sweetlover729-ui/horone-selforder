@@ -1,0 +1,30 @@
+# 系统文件
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Node.js
+node_modules/
+dist/
+.nuxt/
+.vite/
+
+# 日志
+*.log
+logs/
+
+# 上传文件
+uploads/*
+!uploads/.gitkeep
+
+# IDE
+.vscode/
+.idea/
