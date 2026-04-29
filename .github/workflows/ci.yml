@@ -319,51 +319,37 @@ jobs:
     needs: [backend-test, frontend-console-build, frontend-client-build, lint-and-format]
     runs-on: ubuntu-latest
     if: success() && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
-    
     steps:
-    - name: Webhook Notification (Success)
-      uses: distributhor/workflow-webhook-action@v3
-      with:
-        webhookUrl: ${{ secrets.WEBHOOK_SUCCESS_URL }}
-        payload: |
-          {
-            "text": "✅ CI/CD Passed",
+    - name: Notify Central Control Platform (Success)
+      run: |
+        curl -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "ci_success",
             "repository": "${{ github.repository }}",
             "branch": "${{ github.ref }}",
             "commit": "${{ github.sha }}",
             "author": "${{ github.actor }}",
             "run_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
+          }'
       continue-on-error: true
-    
-    - name: OpenClaw Message (if configured)
-      if: env.OPENCLAW_WEBHOOK != ''
-      env:
-        OPENCLAW_WEBHOOK: ${{ secrets.OPENCLAW_WEBHOOK }}
-      run: |
-        curl -X POST "$OPENCLAW_WEBHOOK" \
-          -H "Content-Type: application/json" \
-          -d '{"message":"✅ CI/CD 成功 - ${{ github.ref }}"}' \
-        || true
 
   notify-failure:
     name: Notify - Build Failure
     needs: [backend-test, frontend-console-build, frontend-client-build, lint-and-format]
     runs-on: ubuntu-latest
     if: failure()
-    
     steps:
-    - name: Webhook Notification (Failure)
-      uses: distributhor/workflow-webhook-action@v3
-      with:
-        webhookUrl: ${{ secrets.WEBHOOK_FAILURE_URL }}
-        payload: |
-          {
-            "text": "❌ CI/CD Failed",
+    - name: Notify Central Control Platform (Failure)
+      run: |
+        curl -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "ci_failure",
             "repository": "${{ github.repository }}",
             "branch": "${{ github.ref }}",
             "commit": "${{ github.sha }}",
             "author": "${{ github.actor }}",
             "run_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
+          }'
       continue-on-error: true
