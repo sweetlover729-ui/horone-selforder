@@ -39,6 +39,7 @@ CORS_ORIGINS = [
 ]
 CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}})
 
+# REST API 使用 Token 认证，无 Cookie-based session，无需 CSRF 保护
 # 全局文件上传大小限制（50MB，超过此值Flask直接拒绝请求）
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 

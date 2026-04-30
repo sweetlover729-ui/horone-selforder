@@ -57,7 +57,7 @@ jobs:
         PGHOST: localhost
         PGPORT: 5432
       run: |
-        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=60
+        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=100
     
     - name: Upload coverage to Codecov
       if: always()

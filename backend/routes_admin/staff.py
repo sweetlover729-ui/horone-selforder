@@ -107,7 +107,7 @@ def update_staff(staff_id):
     if 'is_active' in data and data['is_active'] == 0:
         cursor.execute('''
             SELECT staff_id FROM staff_tokens 
-            WHERE token = %s AND expires_at > NOW()
+            WHERE token = %s AND expires_at::timestamp > NOW()
         ''', (token_for_self_check,))
         token_row = cursor.fetchone()
         if token_row and token_row['staff_id'] == staff_id:

@@ -33,7 +33,7 @@ SMS_TEMPLATE_ID = os.getenv('NOTIFY_SMS_TEMPLATE_ID', '')
 WEBHOOK_URL = os.getenv('NOTIFY_WEBHOOK_URL', '')
 
 # 全局开关
-NOTIFICATION_ENABLED = os.getenv('NOTIFY_ENABLED', 'false').lower() in ('1', 'true', 'yes')
+NOTIFICATION_ENABLED = os.getenv('NOTIFY_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 MAX_RETRIES = 2
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='notify-')

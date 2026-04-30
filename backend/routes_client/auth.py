@@ -44,8 +44,8 @@ def wechat_login():
     database.release_connection(conn)
 
     # 清理该customer过期token（防止膨胀）
-    cursor.execute('DELETE FROM customer_tokens WHERE expires_at < NOW()')
-    cursor.execute('DELETE FROM customer_tokens WHERE customer_id = %s AND expires_at > NOW()', (customer['id'],))
+    cursor.execute('DELETE FROM customer_tokens WHERE expires_at::timestamp < NOW()')
+    cursor.execute('DELETE FROM customer_tokens WHERE customer_id = %s AND expires_at::timestamp > NOW()', (customer['id'],))
 
     # 生成token
     token = generate_token()
@@ -120,8 +120,8 @@ def phone_login():
         conn.commit()
 
     # 清理该customer过期token + 活跃旧token（防止膨胀）
-    cursor.execute('DELETE FROM customer_tokens WHERE expires_at < NOW()')
-    cursor.execute('DELETE FROM customer_tokens WHERE customer_id = %s AND expires_at > NOW()', (customer['id'],))
+    cursor.execute('DELETE FROM customer_tokens WHERE expires_at::timestamp < NOW()')
+    cursor.execute('DELETE FROM customer_tokens WHERE customer_id = %s AND expires_at::timestamp > NOW()', (customer['id'],))
 
     # 生成 token
     token = generate_token()

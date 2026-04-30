@@ -26,7 +26,7 @@ def validate_staff_token(token, allow_inactive=False):
                    st.id as token_id, st.token, st.expires_at
             FROM staff_tokens st
             JOIN staff s ON st.staff_id = s.id
-            WHERE st.token = %s AND st.expires_at > NOW()
+            WHERE st.token = %s AND st.expires_at::timestamp > NOW()
         ''', (token,))
     else:
         cursor.execute('''
@@ -35,7 +35,7 @@ def validate_staff_token(token, allow_inactive=False):
                    st.id as token_id, st.token, st.expires_at
             FROM staff_tokens st
             JOIN staff s ON st.staff_id = s.id
-            WHERE st.token = %s AND st.expires_at > NOW()
+            WHERE st.token = %s AND st.expires_at::timestamp > NOW()
             AND s.is_active = 1
         ''', (token,))
     result = cursor.fetchone()
@@ -57,7 +57,7 @@ def validate_customer_token(token):
                c.id, c.name, c.nickname, c.phone, c.openid, c.created_at
         FROM customer_tokens ct
         JOIN customers c ON ct.customer_id = c.id
-        WHERE ct.token = %s AND ct.expires_at > NOW()
+        WHERE ct.token = %s AND ct.expires_at::timestamp > NOW()
     ''', (token,))
     result = cursor.fetchone()
     database.release_connection(conn)
@@ -72,7 +72,7 @@ def require_admin(token):
     cursor.execute('''
         SELECT 1 FROM staff_tokens st
         JOIN staff s ON st.staff_id = s.id
-        WHERE st.token = %s AND st.expires_at > NOW()
+        WHERE st.token = %s AND st.expires_at::timestamp > NOW()
           AND s.is_active = 1
           AND s.role IN ('admin', 'super_admin')
     ''', (token,))

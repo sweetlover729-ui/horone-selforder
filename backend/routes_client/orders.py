@@ -165,7 +165,7 @@ def create_order():
 
 @client_bp.route('/orders/my', methods=['GET'])
 def get_my_orders():
-    """获取我的订单列表"""
+    """获取我的订单列表（优化：2次查询替代N+1）"""
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
     customer = validate_customer_token(token)
     if not customer:
@@ -181,11 +181,12 @@ def get_my_orders():
         WHERE customer_id = %s AND status != 'deleted'
         ORDER BY created_at DESC
     ''', (customer['id'],))
+    orders_data = cursor.fetchall()
 
     orders = []
-    for row in cursor.fetchall():
-        order = row
-        # 获取订单项
+    if orders_data:
+        # 一次查询批量获取所有订单项（消除N+1）
+        order_ids = [o['id'] for o in orders_data]
         cursor.execute('''
             SELECT oi.*, pt.name as product_type_name, b.name as brand_name,
                    m.name as model_name, st.name as service_type_name
@@ -194,27 +195,38 @@ def get_my_orders():
             LEFT JOIN brands b ON oi.brand_id = b.id
             LEFT JOIN models m ON oi.model_id = m.id
             LEFT JOIN service_types st ON oi.service_type_id = st.id
-            WHERE oi.order_id = %s
-        ''', (order['id'],))
-        items = [r for r in cursor.fetchall()]
-        order['items'] = items
+            WHERE oi.order_id = ANY(%s)
+        ''', (order_ids,))
+        all_items = cursor.fetchall()
 
-        # 提取第一个订单项的主要信息(用于列表展示),优先用自定义文字
-        if items:
-            first_item = items[0]
-            order['productName'] = first_item.get('product_type_name', '') or ''
-            order['brandName'] = first_item.get('brand_name_text') or first_item.get('brand_name', '') or ''
-            order['model'] = first_item.get('model_name_text') or first_item.get('model_name', '') or ''
-            order['serviceName'] = first_item.get('service_name_text') or first_item.get('service_type_name', '') or ''
-            order['servicePrice'] = first_item.get('item_price', 0) or 0
-        else:
-            order['productName'] = ''
-            order['brandName'] = ''
-            order['model'] = ''
-            order['serviceName'] = ''
-            order['servicePrice'] = 0
+        # 按 order_id 分组
+        items_by_order = {}
+        for item in all_items:
+            oid = item['order_id']
+            if oid not in items_by_order:
+                items_by_order[oid] = []
+            items_by_order[oid].append(item)
 
-        orders.append(order)
+        for order in orders_data:
+            items = items_by_order.get(order['id'], [])
+            order['items'] = items
+
+            # 提取第一个订单项的主要信息(用于列表展示),优先用自定义文字
+            if items:
+                first_item = items[0]
+                order['productName'] = first_item.get('product_type_name', '') or ''
+                order['brandName'] = first_item.get('brand_name_text') or first_item.get('brand_name', '') or ''
+                order['model'] = first_item.get('model_name_text') or first_item.get('model_name', '') or ''
+                order['serviceName'] = first_item.get('service_name_text') or first_item.get('service_type_name', '') or ''
+                order['servicePrice'] = first_item.get('item_price', 0) or 0
+            else:
+                order['productName'] = ''
+                order['brandName'] = ''
+                order['model'] = ''
+                order['serviceName'] = ''
+                order['servicePrice'] = 0
+
+            orders.append(order)
 
     database.release_connection(conn)
     return jsonify({'success': True, 'data': orders})
@@ -601,7 +613,8 @@ def download_pdf(order_id):
     # 客户端:PDF超过15天不可下载(管理员不受限制)
     if pdf_path and os.path.exists(pdf_path):
         pdf_age_days = (_time.time() - os.path.getmtime(pdf_path)) / 86400
-        if pdf_age_days > 15:
+        pdf_expiry_days = int(os.getenv('PDF_EXPIRY_DAYS', '15'))
+        if pdf_age_days > pdf_expiry_days:
             return jsonify({'success': False, 'message': '维修报告已过期(超过15天),如需查阅请联系皓壹潜水中心'})
         return send_file(pdf_path, as_attachment=True, download_name=f"{order['order_no']}.pdf")
     else:

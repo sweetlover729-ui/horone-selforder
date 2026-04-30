@@ -58,8 +58,8 @@ def staff_login():
         cursor.execute('UPDATE staff SET password_hash = %s WHERE id = %s', (new_hash, staff['id']))
 
     # 清理该staff所有过期token + 活跃旧token（防止token膨胀）
-    cursor.execute('DELETE FROM staff_tokens WHERE expires_at < NOW()')
-    cursor.execute('DELETE FROM staff_tokens WHERE staff_id = %s AND expires_at > NOW()', (staff['id'],))
+    cursor.execute('DELETE FROM staff_tokens WHERE expires_at::timestamp < NOW()')
+    cursor.execute('DELETE FROM staff_tokens WHERE staff_id = %s AND expires_at::timestamp > NOW()', (staff['id'],))
 
     # 生成新token
     token = generate_token()

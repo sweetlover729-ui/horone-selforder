@@ -46,7 +46,7 @@ def receive_order(order_id):
             WHERE id = %s AND status NOT IN ('inspecting', 'repairing', 'ready', 'shipped', 'completed')
         ''', (order_id,))
         if cursor.rowcount > 0:
-            log_status_change(conn, order_id, 'status', old_status, 'received', staff['full_name'] or staff['username'])
+            log_status_change(conn, order_id, 'status', old_status, 'received', staff.get('full_name') or staff.get('username') or 'unknown')
 
         if cursor.rowcount == 0:
             # 可能是重复提交，检查是否有 received 节点（无节点=非法状态）
@@ -160,7 +160,7 @@ def inspect_order(order_id):
         SET status = 'inspecting', updated_at = NOW()
         WHERE id = %s
     ''', (order_id,))
-    log_status_change(conn, order_id, 'status', current_status, 'inspecting', staff['full_name'] or staff['username'])
+    log_status_change(conn, order_id, 'status', current_status, 'inspecting', staff.get('full_name') or staff.get('username') or 'unknown')
 
     # 检查是否已有 inspect 节点，有则更新，无则创建
     cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'inspect'))
@@ -286,7 +286,7 @@ def repair_order(order_id):
         SET status = 'repairing', updated_at = NOW()
         WHERE id = %s
     ''', (order_id,))
-    log_status_change(conn, order_id, 'status', current_status, 'repairing', staff['full_name'] or staff['username'])
+    log_status_change(conn, order_id, 'status', current_status, 'repairing', staff.get('full_name') or staff.get('username') or 'unknown')
 
     # 检查是否已有 repair 节点，有则更新，无则创建
     cursor.execute('SELECT id, photos FROM tracking_nodes WHERE order_id=%s AND node_code=%s', (order_id, 'repair'))
@@ -516,7 +516,7 @@ def qc_order(order_id):
         SET status = 'ready', pdf_path = %s, updated_at = NOW()
         WHERE id = %s
     ''', (pdf_path, order_id))
-    log_status_change(conn, order_id, 'status', order['status'], 'ready', staff['full_name'] or staff['username'])
+    log_status_change(conn, order_id, 'status', order['status'], 'ready', staff.get('full_name') or staff.get('username') or 'unknown')
     _integration_hook_notify(conn, order_id, 'console', 'ready')
 
     # 检查是否已有 qc 节点，有则更新，无则创建
@@ -569,7 +569,7 @@ def qc_order(order_id):
         except Exception as e:
             logger.error("PDF生成失败 order_id=%s: %s", order_id, e)
 
-    threading.Thread(target=generate_pdf_async, daemon=True).start()
+    threading.Thread(target=generate_pdf_async, daemon=False).start()
 
     return jsonify({'success': True, 'pdf_path': pdf_path, 'message': '质检通过，PDF生成中'})
 
@@ -652,7 +652,7 @@ def ship_order(order_id):
         SET status = 'shipped', updated_at = NOW()
         WHERE id = %s
     ''', (order_id,))
-    log_status_change(conn, order_id, 'status', current_status, 'shipped', staff['full_name'] or staff['username'])
+    log_status_change(conn, order_id, 'status', current_status, 'shipped', staff.get('full_name') or staff.get('username') or 'unknown')
 
     # 更新回寄快递信息
     if ship_company or ship_no:
@@ -749,7 +749,7 @@ def complete_order(order_id):
             updated_at = NOW()
         WHERE id = %s
     ''', (order_id,))
-    log_status_change(conn, order_id, 'status', current_status, 'completed', staff['full_name'] or staff['username'])
+    log_status_change(conn, order_id, 'status', current_status, 'completed', staff.get('full_name') or staff.get('username') or 'unknown')
 
     # 添加追踪节点
     cursor.execute('''
