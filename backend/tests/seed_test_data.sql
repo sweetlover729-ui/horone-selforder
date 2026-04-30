@@ -62,8 +62,8 @@ ON CONFLICT (id) DO NOTHING;
 -- Staff users (for auth tests)
 -- ═══════════════════════════════════════════════════════
 INSERT INTO public.staff (id, username, password_hash, full_name, role, is_active) VALUES
-(1, 'kent', '$2b$12$bFjZYfvqY.x3Qkcgkku8ZeLxHn2Roq5OvNFmnQApClnrADvb7/v6.', 'kent', 'admin', 1),
-(2, 'test', '$2b$12$GBl1B0K3hnZrOCjEqfTpc.wyclRaZNStCHk7tB61YyQ5Oi5QCDdhS', '测试技师', 'technician', 1)
+(1, 'kent', '$2b$12$3PMcTcDcXoTjuLj1r10yTuATg82EudHu8yPF9I6M0Z01V0JEBh0iW', 'kent', 'admin', 1),
+(2, 'test', '$2b$12$18y78BcWqQwYiB8Q4JNiQe8QPGyDjrpQ0KTVhU54oL11fV9/vwMS6', '测试技师', 'technician', 1)
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
