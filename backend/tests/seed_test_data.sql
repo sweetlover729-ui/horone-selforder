@@ -2,10 +2,11 @@
 -- CI Test Seed Data for horone.selforder
 -- Run AFTER schema.sql tables are created
 -- Provides minimal catalog + staff data for all test cases
+-- Columns match actual PG schema (verified 2026-05-01)
 -- ================================================================================
 
 -- ═══════════════════════════════════════════════════════
--- Categories (required by service_types.category_id FK)
+-- Categories
 -- ═══════════════════════════════════════════════════════
 INSERT INTO public.categories (id, name) VALUES
 (1, '备用二级头'),
@@ -21,41 +22,43 @@ INSERT INTO public.categories (id, name) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
--- Product Types
+-- Product Types (id, name, sort_order, is_active, categories)
 -- ═══════════════════════════════════════════════════════
-INSERT INTO public.product_types (id, name, categories, description, sort_order, is_active) VALUES
-(1, '调节器', '一级头,二级头,备用二级头', '潜水调节器维修保养', 1, 1),
-(2, 'BCD', 'BCD', '浮力调节器维修保养', 2, 1),
-(4, '电脑表', '电脑表', '潜水电脑表维修保养', 3, 1)
+INSERT INTO public.product_types (id, name, sort_order, is_active, categories) VALUES
+(1, '调节器',  1, 1, '{一级头,二级头,备用二级头}'),
+(2, 'BCD',     2, 1, '{BCD}'),
+(4, '电脑表',  3, 1, '{电脑表}')
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
--- Brands
+-- Brands (id, product_type_id, name, is_active)
 -- ═══════════════════════════════════════════════════════
-INSERT INTO public.brands (id, name, description, sort_order, is_active) VALUES
-(1, 'Scubapro', 'Scubapro 品牌', 1, 1),
-(2, 'Apeks', 'Apeks 品牌', 2, 1),
-(3, 'Mares', 'Mares 品牌', 3, 1),
-(4, 'Poseidon', 'Poseidon 品牌', 4, 1),
-(5, 'Atomic', 'Atomic 品牌', 5, 1)
+INSERT INTO public.brands (id, product_type_id, name, is_active) VALUES
+(1, 1, 'Scubapro', 1),
+(2, 1, 'Apeks',    1),
+(3, 1, 'Mares',    1),
+(4, 1, 'Poseidon', 1),
+(5, 1, 'Atomic',   1)
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
--- Models (id=79 needed by test_state_machine _create_order)
+-- Models (id, brand_id, name, category, is_active)
+-- id=79 needed by test_state_machine _create_order
 -- ═══════════════════════════════════════════════════════
-INSERT INTO public.models (id, name, brand_id, category, is_active) VALUES
-(79, 'MK25/S600', 1, '调节器', 1)
+INSERT INTO public.models (id, brand_id, name, category, is_active) VALUES
+(79, 1, 'MK25/S600', '调节器', 1)
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
--- Service Types (id=15 needed by all order creation tests)
+-- Service Types (id, product_type_id, name, base_price, category_id, is_active)
+-- id=15 needed by all order creation tests
 -- ═══════════════════════════════════════════════════════
-INSERT INTO public.service_types (id, product_type_id, name, description, base_price, category_id, is_active) VALUES
-(15, 1, '标准套装保养', '调节器标准保养套装', 300.0, 3, 1),
-(1,  1, '一级头保养', '一级头单独保养', 200.0, 5, 1),
-(2,  1, '二级头保养', '二级头单独保养', 150.0, 4, 1),
-(3,  2, 'BCD标准保养', 'BCD标准保养', 250.0, 2, 1),
-(4,  4, '电脑表检测', '电脑表功能检测', 100.0, 6, 1)
+INSERT INTO public.service_types (id, product_type_id, name, base_price, category_id, is_active) VALUES
+(15, 1, '标准套装保养', 300, 3, 1),
+(1,  1, '一级头保养',  200, 5, 1),
+(2,  1, '二级头保养',  150, 4, 1),
+(3,  2, 'BCD标准保养', 250, 2, 1),
+(4,  4, '电脑表检测',  100, 6, 1)
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
@@ -69,9 +72,9 @@ ON CONFLICT (id) DO NOTHING;
 -- ═══════════════════════════════════════════════════════
 -- Reset sequences after ID insertions
 -- ═══════════════════════════════════════════════════════
-SELECT setval('public.categories_id_seq', COALESCE((SELECT MAX(id) FROM public.categories), 1), true);
+SELECT setval('public.categories_id_seq',    COALESCE((SELECT MAX(id) FROM public.categories),    1), true);
 SELECT setval('public.product_types_id_seq', COALESCE((SELECT MAX(id) FROM public.product_types), 1), true);
-SELECT setval('public.brands_id_seq', COALESCE((SELECT MAX(id) FROM public.brands), 1), true);
-SELECT setval('public.models_id_seq', COALESCE((SELECT MAX(id) FROM public.models), 1), true);
+SELECT setval('public.brands_id_seq',        COALESCE((SELECT MAX(id) FROM public.brands),        1), true);
+SELECT setval('public.models_id_seq',        COALESCE((SELECT MAX(id) FROM public.models),        1), true);
 SELECT setval('public.service_types_id_seq', COALESCE((SELECT MAX(id) FROM public.service_types), 1), true);
-SELECT setval('public.staff_id_seq', COALESCE((SELECT MAX(id) FROM public.staff), 1), true);
+SELECT setval('public.staff_id_seq',         COALESCE((SELECT MAX(id) FROM public.staff),         1), true);
