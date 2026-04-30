@@ -2449,5 +2449,3 @@ ALTER TABLE ONLY public.status_change_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 96moxelK9vfLm1EFgoc9R9oSMHbGcM84UmusD1IHi8aGqu4gIlZ4DmjEU2unPXY
-
