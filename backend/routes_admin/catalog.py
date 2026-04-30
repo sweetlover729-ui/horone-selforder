@@ -3,6 +3,7 @@
 from . import admin_bp
 from auth import admin_required, validate_staff_token
 import database
+import psycopg2
 from psycopg2 import sql
 from flask import request, jsonify
 from datetime import datetime

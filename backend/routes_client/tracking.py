@@ -2,6 +2,7 @@
 """客户端物流追踪 (tracking, return-express, checkin, nodes, photos)"""
 from . import client_bp
 from auth import validate_customer_token
+from status_log import log_status_change
 import database
 from psycopg2 import sql
 from flask import request, jsonify, send_file

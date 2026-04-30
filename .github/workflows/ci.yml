@@ -38,6 +38,7 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         cache: 'pip'
+        cache-dependency-path: backend/requirements.txt
     
     - name: Install dependencies
       working-directory: backend
@@ -98,7 +99,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: console-dist
-        path: frontend-console/dist/
+        path: dist/console/
 
   frontend-client-build:
     name: Frontend Client Build
@@ -131,7 +132,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: client-dist
-        path: frontend/dist/
+        path: dist/client/
 
   lint-and-format:
     name: Lint & Format Check
