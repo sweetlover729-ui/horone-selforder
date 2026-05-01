@@ -196,7 +196,14 @@ class TestAdminCatalog:
                           headers=_h(staff_token))
         assert resp.status_code == 200
 
-    def test_create_model(self, client, staff_token):
+    def test_create_model(self, client, staff_token, db_conn):
+        # Diagnostic: verify categories exist in CI
+        cur = db_conn.cursor()
+        cur.execute("SELECT id, name FROM categories ORDER BY id")
+        cats = cur.fetchall()
+        cat_ids = [c['id'] for c in cats]
+        assert 1 in cat_ids, f'Categories in DB: {cats}'
+
         resp = client.post('/api/v1/console/admin/models',
                            json={'brand_id': 1, 'name': '_TEST_MODEL_',
                                  'category_ids': [1, 2]},
