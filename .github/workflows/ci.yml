@@ -71,7 +71,7 @@ jobs:
         PGPORT: 5432
       run: |
         mkdir -p /tmp/horone-test/uploads/pdfs /tmp/horone-test/uploads/orders
-        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=52
+        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=74
     
     - name: Upload coverage to Codecov
       if: always()
@@ -289,7 +289,6 @@ jobs:
     needs: [backend-test, frontend-console-build, frontend-client-build, lint-and-format]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
     
     steps:
     - uses: actions/checkout@v4

@@ -12,6 +12,16 @@ import database
 from status_log import log_status_change
 
 
+@pytest.fixture(autouse=True)
+def _rollback_session_conn(db_conn):
+    """Auto-rollback session db_conn after each test to prevent cascading InFailedSqlTransaction errors."""
+    yield
+    try:
+        db_conn.rollback()
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope='session')
 def db_conn():
     """Session-scoped DB connection for building test data.
