@@ -62,6 +62,21 @@ INSERT INTO public.service_types (id, product_type_id, name, base_price, categor
 ON CONFLICT (id) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════
+-- Customers (id=1 required by FK constraints in admin/console tests)
+-- phone=13900000001 matches conftest.py customer_token fixture
+-- ═══════════════════════════════════════════════════════
+INSERT INTO public.customers (id, phone, name, openid, is_dealer, discount_rate) VALUES
+(1, '13900000001', '测试客户', NULL, 0, 100)
+ON CONFLICT (id) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════
+-- Orders (id=1 required by inventory part_usage FK tests)
+-- ═══════════════════════════════════════════════════════
+INSERT INTO public.orders (id, order_no, customer_id, status, payment_status) VALUES
+(1, 'TEST-SEED-0001', 1, 'pending', 'unpaid')
+ON CONFLICT (id) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════
 -- Staff users (for auth tests)
 -- ═══════════════════════════════════════════════════════
 INSERT INTO public.staff (id, username, password_hash, full_name, role, is_active) VALUES
@@ -78,3 +93,5 @@ SELECT setval('public.brands_id_seq',        COALESCE((SELECT MAX(id) FROM publi
 SELECT setval('public.models_id_seq',        COALESCE((SELECT MAX(id) FROM public.models),        1), true);
 SELECT setval('public.service_types_id_seq', COALESCE((SELECT MAX(id) FROM public.service_types), 1), true);
 SELECT setval('public.staff_id_seq',         COALESCE((SELECT MAX(id) FROM public.staff),         1), true);
+SELECT setval('public.customers_id_seq',     COALESCE((SELECT MAX(id) FROM public.customers),     1), true);
+SELECT setval('public.orders_id_seq',        COALESCE((SELECT MAX(id) FROM public.orders),        1), true);
