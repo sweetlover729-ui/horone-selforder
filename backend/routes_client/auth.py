@@ -35,13 +35,13 @@ def wechat_login():
                 VALUES (%s, %s, NOW())
             ''', (openid, nickname))
             conn.commit()
+            cursor = conn.cursor()
             cursor.execute("SELECT * FROM customers WHERE openid = %s", (openid,))
             customer = cursor.fetchone()
     else:
         # 实际微信登录(待实现)
         database.release_connection(conn)
         return jsonify({'success': False, 'message': '微信登录暂未实现,请使用模拟登录'})
-    database.release_connection(conn)
 
     # 清理该customer过期token（防止膨胀）
     cursor.execute('DELETE FROM customer_tokens WHERE expires_at::timestamp < NOW()')

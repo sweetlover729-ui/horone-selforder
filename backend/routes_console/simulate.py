@@ -84,10 +84,10 @@ def simulate_step(order_id, step):
         item_data = request.get_json() or {}
 
         steps_map = {
-            'create': {'status': 'confirmed', 'node_code': 'paid',
+            'create': {'status': 'confirmed', 'node_code': 'payment_update',
                        'node_name': '订单确认',
                        'description': '订单确认'},
-            'pay':    {'status': 'confirmed', 'node_code': 'paid',
+            'pay':    {'status': 'confirmed', 'node_code': 'payment_update',
                        'node_name': '订单确认',
                        'description': '确认收货'},
             'receive':{'status': 'received', 'node_code': 'received',
@@ -160,7 +160,7 @@ def simulate_step(order_id, step):
                     desc_parts.append(express_company)
                 if express_no:
                     desc_parts.append(f"单号:{express_no}")
-                cursor.execute("UPDATE tracking_nodes SET description = %s WHERE order_id = %s AND node_code = 'paid'",
+                cursor.execute("UPDATE tracking_nodes SET description = %s WHERE order_id = %s AND node_code = 'payment_update'",
                              (' '.join(desc_parts), order_id))
 
         if step == 'ship':
@@ -274,6 +274,9 @@ def simulate_cleanup():
 
     cleaned = 0
     for oid in sim_orders:
+        # 删除status log
+        cursor.execute('DELETE FROM order_status_log WHERE order_id = %s', (oid,))
+        cursor.execute('DELETE FROM status_change_log WHERE order_id = %s', (oid,))
         # 删除tracking nodes
         cursor.execute('DELETE FROM tracking_nodes WHERE order_id = %s', (oid,))
         # 删除order items

@@ -566,11 +566,11 @@ def get_order_special_services(order_id):
         return jsonify({'success': False, 'message': '订单不存在'})
 
     cursor.execute('''
-        SELECT sr.id, sr.service_id, sr.name, sr.price, sr.quantity,
+        SELECT sr.id, sr.special_service_id, sr.name, sr.price, sr.quantity,
                sr.status, sr.confirmed_at, sr.created_at,
                ss.name as service_name, ss.description
         FROM special_service_records sr
-        LEFT JOIN special_services ss ON sr.service_id = ss.id
+        LEFT JOIN special_services ss ON sr.special_service_id = ss.id
         WHERE sr.order_id = %s
         ORDER BY sr.created_at ASC
     ''', (order_id,))
