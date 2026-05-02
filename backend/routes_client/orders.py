@@ -399,9 +399,6 @@ def edit_order(order_id):
                 if item.get('service_name'):
                     updates.append('service_name_text = %s')
                     params.append(item['service_name'])
-            if item.get('service_item_id') is not None:
-                updates.append('service_item_id = %s')
-                params.append(item['service_item_id'])
             if item.get('category'):
                 updates.append('category = %s')
                 params.append(item['category'])
@@ -417,7 +414,7 @@ def edit_order(order_id):
     note = data.get('customer_note')
     if note is not None:
         cursor.execute('''
-            UPDATE orders SET customer_note = %s, updated_at = NOW()
+            UPDATE orders SET customer_remark = %s, updated_at = NOW()
             WHERE id = %s
         ''', (note, order_id))
 

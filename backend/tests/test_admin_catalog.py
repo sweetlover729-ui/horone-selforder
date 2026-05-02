@@ -181,6 +181,56 @@ class TestCatalogGap:
         cur.execute('DELETE FROM models WHERE id=%s', (model_id,))
         db_conn.commit()
 
+    def test_delete_category_with_models_fails(self, client, staff_token, db_conn):
+        """删除有关联型号的类别 → 被拒绝"""
+        cur = db_conn.cursor()
+        # 创建类别
+        cur.execute("INSERT INTO categories (name, description, sort_order) VALUES (%s, %s, %s) RETURNING id",
+                    ('_DELCAT_LINKED_', 'has models', 9998))
+        cat_id = cur.fetchone()['id']
+        db_conn.commit()
+
+        # 创建型号并关联到该类别
+        cur.execute("INSERT INTO models (brand_id, name, serial_no, is_active) VALUES (%s,%s,%s,%s) RETURNING id",
+                    (1, '_MODEL_FOR_CAT_', 'SN-CAT-001', 1))
+        model_id = cur.fetchone()['id']
+        cur.execute("INSERT INTO model_categories (model_id, category_id) VALUES (%s,%s)", (model_id, cat_id))
+        db_conn.commit()
+
+        resp = client.delete(f'/api/v1/console/admin/categories/{cat_id}',
+                             headers=_h(staff_token))
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is False
+        assert '无法删除' in data['message']
+
+        # Cleanup
+        cur.execute('DELETE FROM model_categories WHERE model_id=%s', (model_id,))
+        cur.execute('DELETE FROM models WHERE id=%s', (model_id,))
+        cur.execute('DELETE FROM categories WHERE id=%s', (cat_id,))
+        db_conn.commit()
+
+    def test_update_product_type_empty(self, client, staff_token, db_conn):
+        """更新产品类型无有效字段 → 无更新内容"""
+        cur = db_conn.cursor()
+        cur.execute("INSERT INTO product_types (name, sort_order, categories, is_active) VALUES (%s,%s,%s,%s) RETURNING id",
+                    ('_EMPTYUPD_PT_', 9995, '{}', 1))
+        pt_id = cur.fetchone()['id']
+        db_conn.commit()
+
+        # 发送空 JSON（无任何有效字段）
+        resp = client.put(f'/api/v1/console/admin/product-types/{pt_id}',
+                          json={},
+                          headers=_headers(staff_token))
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is False
+        assert '无更新内容' in data['message']
+
+        # Cleanup
+        cur.execute('DELETE FROM product_types WHERE id=%s', (pt_id,))
+        db_conn.commit()
+
     # ===== Token / Permission tests =====
     def test_catalog_no_token(self, client):
         """无 token 访问 catalog 端点 → 403（before_request 拦截）"""

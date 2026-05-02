@@ -191,7 +191,7 @@ def store_checkin(order_id):
     cursor = conn.cursor()
 
     # 验证订单归属
-    cursor.execute('SELECT id, status, delivery_type FROM orders WHERE id = %s AND customer_id = %s', (order_id, customer['id']))
+    cursor.execute('SELECT id, status, delivery_type, customer_id FROM orders WHERE id = %s AND customer_id = %s', (order_id, customer['id']))
     order = cursor.fetchone()
     if not order:
         database.release_connection(conn)
@@ -214,14 +214,14 @@ def store_checkin(order_id):
     old_status = order['status']
     cursor.execute('''
         UPDATE orders
-        SET status = 'paid', payment_status = 'paid',
+        SET status = 'confirmed', payment_status = 'paid',
             payment_time = NOW(),
             store_checkin_at = NOW(),
             updated_at = NOW()
         WHERE id = %s
     ''', (order_id,))
 
-    log_status_change(conn, order_id, 'status', old_status, 'paid', customer['nickname'] or customer['phone'], 'client')
+    log_status_change(conn, order_id, 'status', old_status, 'confirmed', customer['nickname'] or customer['phone'], 'client')
 
     # 添加追踪节点
     cursor.execute('''

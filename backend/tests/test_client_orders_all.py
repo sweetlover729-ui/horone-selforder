@@ -14,7 +14,7 @@ def _hg(token):
 
 def _get_ids(db_conn):
     cur = db_conn.cursor()
-    cur.execute("SELECT id FROM customers WHERE phone='13900000001' ORDER BY id DESC LIMIT 1")
+    cur.execute("SELECT id FROM customers WHERE phone='13900000001' ORDER BY id ASC LIMIT 1")
     cust = cur.fetchone()
     cur.execute("SELECT id FROM product_types ORDER BY id LIMIT 1")
     pt = cur.fetchone()

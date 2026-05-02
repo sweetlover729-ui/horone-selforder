@@ -33,7 +33,7 @@ def _get_valid_ids(db_conn):
     cur = db_conn.cursor()
     cur.execute(
         "SELECT id FROM customers WHERE phone='13900000001' "
-        "ORDER BY id DESC LIMIT 1")
+        "ORDER BY id ASC LIMIT 1")
     cust = cur.fetchone()
     cur.execute("SELECT id FROM product_types ORDER BY id LIMIT 1")
     pt = cur.fetchone()
@@ -237,45 +237,50 @@ class TestReturnExpressClient:
 # ═══════════════════════════════════════════════════════════
 
 class TestStoreCheckin:
-    # BUG: store_checkin SELECT misses 'customer_id' (tracking.py:199),
-    # but the subsequent line references order['customer_id'] → KeyError.
-    # Fix: add customer_id to SELECT columns.
-    # Tests use pytest.raises to document the bug while covering code paths.
+    # Bug fixed: added customer_id to SELECT columns (tracking.py).
 
-    def test_pending_store_checkin_bug(self, client, customer_token, db_conn):
+    def test_pending_store_checkin(self, client, customer_token, db_conn):
         cust_id = _get_valid_ids(db_conn)[0]
         oid = _make_order(db_conn, cust_id, status='pending',
                           delivery_type='store')
-        with pytest.raises(KeyError, match='customer_id'):
-            client.post(f'{BASE}/{oid}/checkin',
-                        json={}, headers=_hg(customer_token))
+        resp = client.post(f'{BASE}/{oid}/checkin',
+                           json={}, headers=_hg(customer_token))
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is True
         _cleanup(db_conn, oid)
 
-    def test_express_not_store_bug(self, client, customer_token, db_conn):
+    def test_express_not_store(self, client, customer_token, db_conn):
         cust_id = _get_valid_ids(db_conn)[0]
         oid = _make_order(db_conn, cust_id, status='pending',
                           delivery_type='express')
-        with pytest.raises(KeyError, match='customer_id'):
-            client.post(f'{BASE}/{oid}/checkin',
-                        json={}, headers=_hg(customer_token))
+        resp = client.post(f'{BASE}/{oid}/checkin',
+                           json={}, headers=_hg(customer_token))
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert '不是到店交付' in data.get('message', '')
         _cleanup(db_conn, oid)
 
-    def test_completed_status_rejected_bug(self, client, customer_token, db_conn):
+    def test_completed_status_rejected(self, client, customer_token, db_conn):
         cust_id = _get_valid_ids(db_conn)[0]
         oid = _make_order(db_conn, cust_id, status='completed',
                           delivery_type='store')
-        with pytest.raises(KeyError, match='customer_id'):
-            client.post(f'{BASE}/{oid}/checkin',
-                        json={}, headers=_hg(customer_token))
+        resp = client.post(f'{BASE}/{oid}/checkin',
+                           json={}, headers=_hg(customer_token))
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert '不允许签到' in data.get('message', '')
         _cleanup(db_conn, oid)
 
-    def test_received_status_rejected_bug(self, client, customer_token, db_conn):
+    def test_received_status_rejected(self, client, customer_token, db_conn):
         cust_id = _get_valid_ids(db_conn)[0]
         oid = _make_order(db_conn, cust_id, status='received',
                           delivery_type='store')
-        with pytest.raises(KeyError, match='customer_id'):
-            client.post(f'{BASE}/{oid}/checkin',
-                        json={}, headers=_hg(customer_token))
+        resp = client.post(f'{BASE}/{oid}/checkin',
+                           json={}, headers=_hg(customer_token))
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert '不允许签到' in data.get('message', '')
         _cleanup(db_conn, oid)
 
     def test_no_auth(self, client, db_conn):

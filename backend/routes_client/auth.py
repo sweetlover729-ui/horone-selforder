@@ -94,9 +94,9 @@ def phone_login():
     conn = database.get_connection()
     cursor = conn.cursor()
 
-    # 查找已有客户(按手机号优先,其次姓名)
+    # 查找已有客户(按手机号优先,其次姓名) — ORDER BY id ASC 确保确定性
     cursor.execute(
-        "SELECT * FROM customers WHERE phone = %s", (phone,)
+        "SELECT * FROM customers WHERE phone = %s ORDER BY id ASC LIMIT 1", (phone,)
     )
     customer = cursor.fetchone()
 
