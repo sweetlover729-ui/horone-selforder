@@ -197,16 +197,16 @@ class TestAdminCatalog:
         assert resp.status_code == 200
 
     def test_create_model(self, client, staff_token, db_conn):
-        # Diagnostic: verify categories exist in CI
+        # Query existing categories to use available IDs (CI compat)
         cur = db_conn.cursor()
-        cur.execute("SELECT id, name FROM categories ORDER BY id")
+        cur.execute("SELECT id, name FROM categories ORDER BY id LIMIT 5")
         cats = cur.fetchall()
         cat_ids = [c['id'] for c in cats]
-        assert 1 in cat_ids, f'Categories in DB: {cats}'
+        assert len(cat_ids) >= 2, f'Need >=2 categories, got: {cats}'
 
         resp = client.post('/api/v1/console/admin/models',
                            json={'brand_id': 1, 'name': '_TEST_MODEL_',
-                                 'category_ids': [1, 2]},
+                                 'category_ids': cat_ids[:2]},
                            headers=_headers(staff_token))
         assert resp.status_code == 200
         data = resp.get_json()
@@ -216,7 +216,7 @@ class TestAdminCatalog:
         # Update
         resp = client.put(f'/api/v1/console/admin/models/{model_id}',
                           json={'name': '_TEST_MODEL_UPDATED_',
-                                'category_ids': [1], 'is_active': 1},
+                                'category_ids': [cat_ids[0]], 'is_active': 1},
                           headers=_headers(staff_token))
         assert resp.status_code == 200
 
