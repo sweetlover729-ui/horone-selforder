@@ -1262,7 +1262,7 @@ CREATE TABLE public.tracking_nodes (
     photos text DEFAULT '[]'::text,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT chk_tracking_nodes_node_code CHECK ((node_code = ANY (ARRAY['created'::text, 'received'::text, 'inspect'::text, 'repair'::text, 'qc'::text, 'shipped'::text, 'completed'::text, 'payment_update'::text, 'special_service'::text, 'special_update'::text, 'return_express'::text])))
+    CONSTRAINT chk_tracking_nodes_node_code CHECK ((node_code = ANY (ARRAY['created'::text, 'received'::text, 'inspect'::text, 'repair'::text, 'qc'::text, 'shipped'::text, 'completed'::text, 'payment_update'::text, 'special_service'::text, 'special_update'::text, 'return_express'::text, 'store_checkin'::text])))
 );
 
 

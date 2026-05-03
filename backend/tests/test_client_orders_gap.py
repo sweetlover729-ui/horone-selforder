@@ -24,7 +24,7 @@ class TestEditOrderItems:
                     'product_type_id': 4,
                     'brand_id': 2,
                     'brand_name': 'Custom Brand',
-                    'model_id': 80,
+                    'model_id': 79,
                     'model_name': 'Custom Model',
                     'service_type_id': 16,
                     'service_name': 'Custom Service',
