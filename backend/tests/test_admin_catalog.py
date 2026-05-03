@@ -33,6 +33,52 @@ class TestCatalogGap:
         cur.execute('SELECT COUNT(*) as cnt FROM categories WHERE id=%s', (cat_id,))
         assert cur.fetchone()['cnt'] == 0
 
+    def test_update_category_success(self, client, staff_token, db_conn):
+        """更新类别 → 覆盖 UPDATE 路径"""
+        cur = db_conn.cursor()
+        cur.execute("INSERT INTO categories (name, description, sort_order) VALUES (%s,%s,%s) RETURNING id",
+                    ('_UPDCAT_', 'test', 9997))
+        cat_id = cur.fetchone()['id']
+        db_conn.commit()
+
+        resp = client.put(f'/api/v1/console/admin/categories/{cat_id}',
+                          json={'name': '_UPDCAT_V2_', 'description': 'desc v2',
+                                'sort_order': 3, 'is_active': 1},
+                          headers=_headers(staff_token))
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is True
+
+        cur.execute('SELECT name, description, sort_order, is_active FROM categories WHERE id=%s', (cat_id,))
+        row = cur.fetchone()
+        assert row['name'] == '_UPDCAT_V2_'
+        assert row['description'] == 'desc v2'
+        assert row['sort_order'] == 3
+
+        # Cleanup
+        cur.execute('DELETE FROM categories WHERE id=%s', (cat_id,))
+        db_conn.commit()
+
+    def test_update_category_empty(self, client, staff_token, db_conn):
+        """更新类别无字段 → 无更新内容"""
+        cur = db_conn.cursor()
+        cur.execute("INSERT INTO categories (name, description, sort_order) VALUES (%s,%s,%s) RETURNING id",
+                    ('_EMPTYCAT_', 'test', 9996))
+        cat_id = cur.fetchone()['id']
+        db_conn.commit()
+
+        resp = client.put(f'/api/v1/console/admin/categories/{cat_id}',
+                          json={},
+                          headers=_headers(staff_token))
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is False
+        assert '无更新内容' in data['message']
+
+        # Cleanup
+        cur.execute('DELETE FROM categories WHERE id=%s', (cat_id,))
+        db_conn.commit()
+
     # ===== Product Types =====
     def test_delete_product_type_success(self, client, staff_token, db_conn):
         """独立删除产品类型"""
