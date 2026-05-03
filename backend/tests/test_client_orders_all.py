@@ -149,7 +149,7 @@ class TestCreateOrder:
                            headers={'Content-Type': 'application/json'})
         assert resp.status_code == 401
 
-    def test_invalid_product_type(self, client, customer_token):
+    def test_invalid_product_type(self, client, customer_token, db_conn):
         resp = client.post(BASE, json={
             'items': [{'product_type_id': 99999, 'service_type_id': 1}],
             'delivery_type': 'express',
