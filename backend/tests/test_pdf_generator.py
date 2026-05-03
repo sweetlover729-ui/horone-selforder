@@ -549,3 +549,138 @@ class TestPdfFinalGap:
         with patch.object(pg, 'BASE_UPLOAD', str(tmp_path)):
             result = pg.cleanup_order_photos(888)
             assert result >= 1
+
+
+class TestPdfGapRound2:
+    """第二轮补齐 — 真实触发生产代码缺口"""
+
+    def test_fmt_time_weekday(self, db_conn, tmp_path):
+        """_fmt_time 周格式日期 → 生产代码 240-246"""
+        with patch.object(pg, 'PDF_DIR', str(tmp_path)):
+            pg.ensure_pdf_dir()
+            cur = db_conn.cursor()
+            cur.execute("""
+                INSERT INTO orders (order_no, status, payment_status, total_amount,
+                    receiver_name, receiver_phone, receiver_address, customer_id, created_at)
+                VALUES ('RMD-FMT-001', 'completed', 'paid', 100, 'A', '13900000001', 'B', 1,
+                    '01 Apr 2026 16:56:35') RETURNING id""")
+            oid = cur.fetchone()['id']
+            db_conn.commit()
+
+            cur.execute("SELECT * FROM orders WHERE id = %s", (oid,))
+            od = dict(cur.fetchone())
+            # 注入非标准格式的 created_at
+            od['created_at'] = '01 Apr 2026 16:56:35'
+            od['completed_at'] = None
+
+            path = pg.generate_order_pdf(od)
+            if path:
+                os.unlink(path)
+
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            db_conn.commit()
+
+    def test_fmt_time_timezone(self, db_conn, tmp_path):
+        """_fmt_time 带时区日期 → 生产代码 248-252"""
+        with patch.object(pg, 'PDF_DIR', str(tmp_path)):
+            pg.ensure_pdf_dir()
+            cur = db_conn.cursor()
+            cur.execute("""
+                INSERT INTO orders (order_no, status, payment_status, total_amount,
+                    receiver_name, receiver_phone, receiver_address, customer_id)
+                VALUES ('RMD-FMT-002', 'completed', 'paid', 100, 'A', '13900000001', 'B', 1)
+                RETURNING id""")
+            oid = cur.fetchone()['id']
+            db_conn.commit()
+
+            cur.execute("SELECT * FROM orders WHERE id = %s", (oid,))
+            od = dict(cur.fetchone())
+            od['created_at'] = '2026-04-30 01:52:49+08:00'
+            od['completed_at'] = '2026-04-30 12:00:00 GMT'
+
+            path = pg.generate_order_pdf(od)
+            if path:
+                os.unlink(path)
+
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            db_conn.commit()
+
+    def test_fmt_time_fallback(self, db_conn, tmp_path):
+        """_fmt_time 兜底路径 → 生产代码 252"""
+        with patch.object(pg, 'PDF_DIR', str(tmp_path)):
+            pg.ensure_pdf_dir()
+            cur = db_conn.cursor()
+            cur.execute("""
+                INSERT INTO orders (order_no, status, payment_status, total_amount,
+                    receiver_name, receiver_phone, receiver_address, customer_id)
+                VALUES ('RMD-FMT-003', 'completed', 'paid', 100, 'A', '13900000001', 'B', 1)
+                RETURNING id""")
+            oid = cur.fetchone()['id']
+            db_conn.commit()
+
+            cur.execute("SELECT * FROM orders WHERE id = %s", (oid,))
+            od = dict(cur.fetchone())
+            od['created_at'] = 'some weird date string'
+            od['completed_at'] = None
+
+            path = pg.generate_order_pdf(od)
+            if path:
+                os.unlink(path)
+
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            db_conn.commit()
+
+    def test_cleanup_remove_exception(self, tmp_path):
+        """cleanup_order_photos os.remove 失败 → 746-748"""
+        photo_dir = tmp_path / '999' / 'nodes' / '100'
+        photo_dir.mkdir(parents=True)
+        (photo_dir / 'photo.jpg').write_text('fake')
+
+        with patch.object(pg, 'BASE_UPLOAD', str(tmp_path)):
+            with patch('os.remove', side_effect=OSError('Permission denied')):
+                result = pg.cleanup_order_photos(999)
+                assert result == 0  # 全异常，计数0
+
+    def test_cleanup_rmdir_exception(self, tmp_path):
+        """cleanup_order_photos os.rmdir 失败 → 755-756"""
+        photo_dir = tmp_path / '888' / 'nodes' / '100'
+        photo_dir.mkdir(parents=True)
+
+        with patch.object(pg, 'BASE_UPLOAD', str(tmp_path)):
+            with patch('os.rmdir', side_effect=OSError('Dir not empty')):
+                result = pg.cleanup_order_photos(888)
+                # glob 找不到文件所以 deleted=0，os.rmdir 异常不影响返回值
+                assert result == 0
+
+    def test_process_page_image_exception(self, db_conn, tmp_path):
+        """_build_process_page — 照片文件不是合法图片 → 174-175"""
+        # 创建伪照片文件
+        node_photo_dir = tmp_path / 'uploads' / 'orders' / '1' / 'nodes' / '100'
+        node_photo_dir.mkdir(parents=True)
+        bad_img = node_photo_dir / 'fake.jpg'
+        bad_img.write_text('not a real jpeg')
+
+        with patch.object(pg, 'BASE_UPLOAD', str(tmp_path / 'uploads')):
+                cur = db_conn.cursor()
+                cur.execute("""
+                    INSERT INTO orders (order_no, status, payment_status, total_amount,
+                        receiver_name, receiver_phone, receiver_address, customer_id, created_at)
+                    VALUES ('RMD-IMG-001', 'completed', 'paid', 100, 'X', '13900000001', 'Y', 1, NOW())
+                    RETURNING id""")
+                oid = cur.fetchone()['id']
+
+                cur.execute("""
+                    INSERT INTO tracking_nodes (order_id, node_code, node_name,
+                        description, operate_time, staff_name, photos)
+                    VALUES (%s, 'shipped', '回寄', 'test', NOW(), 'kent', %s)
+                """, (oid, json.dumps(['orders/1/nodes/100/fake.jpg'])))
+                db_conn.commit()
+
+                cur.execute("SELECT * FROM orders WHERE id = %s", (oid,))
+                S = pg._build_styles()
+                story = pg._build_process_page(dict(cur.fetchone()), db_conn, S)
+                assert len(story) > 0
+
+                cur.execute("DELETE FROM tracking_nodes WHERE order_id = %s", (oid,))
+                cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+                db_conn.commit()

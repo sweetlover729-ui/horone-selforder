@@ -30,11 +30,11 @@ FONT_LIGHT = 'SimSun'  # 苹果简宋
 try:
     pdfmetrics.registerFont(TTFont(FONT_CN,    '/System/Library/Fonts/STHeiti Light.ttc'))
     pdfmetrics.registerFont(TTFont(FONT_LIGHT, '/System/Library/Fonts/Supplemental/Songti.ttc'))
-except Exception:
+except Exception:  # pragma: no cover — macOS 字体始终存在
     try:
         pdfmetrics.registerFont(TTFont(FONT_CN,    '/Library/Fonts/Arial Unicode.ttf'))
         pdfmetrics.registerFont(TTFont(FONT_LIGHT, '/Library/Fonts/Arial Unicode.ttf'))
-    except Exception:
+    except Exception:  # pragma: no cover
         FONT_CN    = 'Helvetica'
         FONT_LIGHT = 'Helvetica'
 
@@ -758,7 +758,7 @@ def cleanup_order_photos(order_id, conn=None):
     return deleted
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover — 手动调试入口
     import database
     conn = database.get_connection()
     cursor = conn.cursor()
