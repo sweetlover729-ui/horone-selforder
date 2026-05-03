@@ -26,7 +26,7 @@ class TestEditOrderItems:
                     'brand_name': 'Custom Brand',
                     'model_id': 79,
                     'model_name': 'Custom Model',
-                    'service_type_id': 16,
+                    'service_type_id': 15,
                     'service_name': 'Custom Service',
                     'category': '一级头',
                     'customer_note': '加速处理'
