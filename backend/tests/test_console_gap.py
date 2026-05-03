@@ -26,7 +26,7 @@ def _make_order(conn, cid=1, status='pending'):
     cur.execute(
         "INSERT INTO order_items (order_id, product_type_id, brand_id, service_type_id, item_price, quantity)"
         " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (oid, 1, 1, 5, 500.00, 1)
+        (oid, 1, 1, 15, 500.00, 1)
     )
     oi_id = cur.fetchone()['id']
     cur.execute(
@@ -109,7 +109,7 @@ class TestDashboard:
 
     def test_report_with_service_type(self, client, staff_token):
         resp = client.get(
-            f'{PREFIX}/dashboard/report?service_type_id=5',
+            f'{PREFIX}/dashboard/report?service_type_id=15',
             headers=_h(staff_token)
         )
         assert resp.status_code == 200
