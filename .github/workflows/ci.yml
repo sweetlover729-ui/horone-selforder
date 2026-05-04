@@ -72,9 +72,23 @@ jobs:
         PGPORT: 5432
       run: |
         mkdir -p /tmp/horone-test/uploads/pdfs /tmp/horone-test/uploads/orders
-        echo "=== DATABASE_URL check ==="
-        python3 -c "import os; print('DATABASE_URL:', os.environ.get('DATABASE_URL', 'NOT SET'))"
-        python3 -c "import os; os.environ['FLASK_ENV']='testing'; os.environ['HORONE_ROOT']='/tmp/horone-test'; import sys; sys.path.insert(0,'.'); import database; print('PG_CONN_STRING:', database.PG_CONN_STRING)"
+        echo "=== Direct DB query test ==="
+        python3 -c "
+import os
+os.environ['FLASK_ENV'] = 'testing'
+os.environ['HORONE_ROOT'] = '/tmp/horone-test'
+import sys
+sys.path.insert(0, '.')
+from database import get_connection
+conn = get_connection()
+cur = conn.cursor()
+cur.execute('SELECT id, username, role, is_active FROM staff')
+rows = cur.fetchall()
+print(f'staff rows: {len(rows)}')
+for r in rows:
+    print(f'  {r}')
+conn.close()
+"
         echo "=== Starting pytest ==="
         pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=100
     
