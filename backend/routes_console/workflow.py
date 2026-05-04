@@ -153,7 +153,7 @@ def inspect_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -273,7 +273,7 @@ def repair_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -382,7 +382,7 @@ def create_special_service(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -434,7 +434,7 @@ def update_special_service(order_id, record_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -517,7 +517,7 @@ def qc_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -624,7 +624,7 @@ def update_return_express(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -665,7 +665,7 @@ def ship_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -764,7 +764,7 @@ def complete_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
@@ -937,7 +937,7 @@ def get_equipment_data(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
     
@@ -1003,7 +1003,7 @@ def save_equipment_data(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
-        if not _check_order_access(cursor, order_id, staff):
+    if not _check_order_access(cursor, order_id, staff):
             database.release_connection(conn)
             return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
     

@@ -8,6 +8,8 @@ from psycopg2 import sql
 from flask import request, jsonify
 from datetime import datetime
 from decimal import Decimal
+from logging_config import get_logger
+logger = get_logger(__name__)
 
 @admin_required
 @admin_bp.route('/categories', methods=['GET'])
