@@ -30,14 +30,14 @@ def wechat_login():
         customer = cursor.fetchone()
 
         if not customer:
-            cursor.execute('''  # pragma: no cover
-                INSERT INTO customers (openid, nickname, updated_at)  # pragma: no cover
-                VALUES (%s, %s, NOW())  # pragma: no cover
+            cursor.execute('''
+                INSERT INTO customers (openid, nickname, updated_at)
+                VALUES (%s, %s, NOW())
             ''', (openid, nickname))
-            conn.commit()  # pragma: no cover
-            cursor = conn.cursor()  # pragma: no cover
-            cursor.execute("SELECT * FROM customers WHERE openid = %s", (openid,))  # pragma: no cover
-            customer = cursor.fetchone()  # pragma: no cover
+            conn.commit()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM customers WHERE openid = %s", (openid,))
+            customer = cursor.fetchone()
     else:
         # 实际微信登录(待实现)
         database.release_connection(conn)
