@@ -52,15 +52,14 @@ def verify_password(password, password_hash):
     # 先尝试 bcrypt
     try:
         if password_hash.startswith('$2b$') or password_hash.startswith('$2a$'):
-            _pw_bytes = password.encode()
-            _hash_bytes = password_hash.encode()
-            _result = bcrypt.checkpw(_pw_bytes, _hash_bytes)
-            logger.warning('verify_password: hash[0:30]=%s hash_len=%d bcrypt_result=%s',
-                          password_hash[:30], len(password_hash), _result)
+            print(f'[DEBUG] verify_password: hash_len={len(password_hash)} hash_{len(password_hash[:50])}={repr(password_hash[:50])}... pwd_len={len(password)}')
+            _result = bcrypt.checkpw(password.encode(), password_hash.encode())
+            print(f'[DEBUG] verify_password: bcrypt_checkpw={_result}')
             if _result:
                 return (True, False)
             return (False, False)
-    except Exception:  # pragma: no cover
+    except Exception as e:  # pragma: no cover
+        print(f'[DEBUG] verify_password: bcrypt EXCEPTION: {type(e).__name__}: {e}')  # pragma: no cover
         pass  # pragma: no cover
 
     # 回退 SHA256（使用 constant-time 比较，防止时序攻击）
