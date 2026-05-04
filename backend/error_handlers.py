@@ -41,11 +41,8 @@ def handle_generic_error(error):
         'error_code': 'ERR_500'  # pragma: no cover
     }  # pragma: no cover
       # pragma: no cover
-    # 开发环境显示详细错误  # pragma: no cover
-    if os.environ.get('FLASK_ENV') == 'development':  # pragma: no cover
-        response['detail'] = str(error)  # pragma: no cover
-        response['traceback'] = traceback.format_exc()  # pragma: no cover
-      # pragma: no cover
+    # 生产环境严禁暴露详细信息（违反 MEMORY.md 最高原则）
+    # 即使 FLASK_ENV=development 也不返回 traceback
     return jsonify(response), 500  # pragma: no cover
 
 def handle_not_found(error):

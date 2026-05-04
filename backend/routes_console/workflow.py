@@ -18,6 +18,20 @@ from . import save_base64_image
 
 logger = get_logger('routes_console.workflow')
 
+def _check_order_access(cursor, order_id, staff):
+    """检查技师是否有权限操作此订单。Admin可操作所有订单；未分配订单所有人可操作；
+    已分配订单只有分配的技师本人可操作。"""
+    if staff.get('role') in ('admin', 'super_admin'):
+        return True
+    cursor.execute('SELECT assigned_staff_id FROM orders WHERE id = %s', (order_id,))
+    order = cursor.fetchone()
+    if not order:
+        return False
+    if order['assigned_staff_id'] is None:
+        return True  # 未分配订单：任何人都可以操作
+    return order['assigned_staff_id'] == staff['id']
+
+
 @console_bp.route('/orders/<int:order_id>/receive', methods=['PUT'])
 def receive_order(order_id):
     """确认收货"""
@@ -36,6 +50,9 @@ def receive_order(order_id):
 
         conn = database.get_connection()
         cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
         # 更新订单状态（只对非received状态更新）
         cursor.execute('SELECT status FROM orders WHERE id = %s', (order_id,))
@@ -136,6 +153,9 @@ def inspect_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 获取当前订单状态
     cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
@@ -253,6 +273,9 @@ def repair_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 构建包含检项的描述
     description = '进行设备维修保养'
@@ -359,6 +382,9 @@ def create_special_service(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 获取名称：优先使用前端传入的name，否则从预设表获取
     service_name = data.get('name', '')
@@ -408,6 +434,9 @@ def update_special_service(order_id, record_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 支持更新 name/price/quantity/status
     set_parts = []
@@ -488,6 +517,9 @@ def qc_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 获取订单信息
     cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
@@ -592,6 +624,9 @@ def update_return_express(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     cursor.execute('''
         UPDATE orders
@@ -630,6 +665,9 @@ def ship_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 获取当前订单状态
     cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
@@ -726,6 +764,9 @@ def complete_order(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
 
     # 获取当前订单状态
     cursor.execute("SELECT status FROM orders WHERE id = %s", (order_id,))
@@ -896,6 +937,9 @@ def get_equipment_data(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
     
     # 获取订单的所有 order_items
     cursor.execute('''
@@ -959,6 +1003,9 @@ def save_equipment_data(order_id):
 
     conn = database.get_connection()
     cursor = conn.cursor()
+        if not _check_order_access(cursor, order_id, staff):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '此订单已分配给其他技师，无权操作'}), 403
     
     try:
         for item in items_data:

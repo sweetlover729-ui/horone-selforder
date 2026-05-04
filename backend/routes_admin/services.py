@@ -130,6 +130,11 @@ def delete_service_type(service_type_id):
     
     conn = database.get_connection()
     cursor = conn.cursor()
+    # 检查是否有关联订单项或价格配置
+    cursor.execute('SELECT COUNT(*) as cnt FROM order_items WHERE service_type_id = %s', (service_type_id,))
+    if cursor.fetchone()['cnt'] > 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '该服务类型下有订单记录，无法删除'})
     cursor.execute('DELETE FROM service_types WHERE id = %s', (service_type_id,))
     conn.commit()
     database.release_connection(conn)

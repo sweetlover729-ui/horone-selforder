@@ -239,6 +239,11 @@ def delete_product_type(type_id):
     
     conn = database.get_connection()
     cursor = conn.cursor()
+    # 检查是否有关联品牌
+    cursor.execute('SELECT COUNT(*) as cnt FROM brands WHERE product_type_id = %s', (type_id,))
+    if cursor.fetchone()['cnt'] > 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '该产品类型下有关联品牌，无法删除'})
     cursor.execute('DELETE FROM product_types WHERE id = %s', (type_id,))
     conn.commit()
     database.release_connection(conn)
@@ -364,6 +369,11 @@ def delete_brand(brand_id):
     
     conn = database.get_connection()
     cursor = conn.cursor()
+    # 检查是否有关联型号
+    cursor.execute('SELECT COUNT(*) as cnt FROM models WHERE brand_id = %s', (brand_id,))
+    if cursor.fetchone()['cnt'] > 0:
+        database.release_connection(conn)
+        return jsonify({'success': False, 'message': '该品牌下有关联型号，无法删除'})
     cursor.execute('DELETE FROM brands WHERE id = %s', (brand_id,))
     conn.commit()
     database.release_connection(conn)
@@ -466,7 +476,8 @@ def create_model():
     except Exception as e:
         conn.rollback()
         database.release_connection(conn)
-        return jsonify({'success': False, 'message': str(e)})
+        logger.error('create_model error: %s', str(e))
+        return jsonify({'success': False, 'message': '创建失败，请联系管理员'})
 
 @admin_required
 @admin_bp.route('/models/<int:model_id>', methods=['PUT'])
@@ -515,7 +526,8 @@ def update_model(model_id):
     except Exception as e:
         conn.rollback()
         database.release_connection(conn)
-        return jsonify({'success': False, 'message': str(e)})
+        logger.error('create_brand error: %s', str(e))
+        return jsonify({'success': False, 'message': '创建失败，请联系管理员'})
 
 @admin_required
 @admin_bp.route('/models/<int:model_id>', methods=['DELETE'])

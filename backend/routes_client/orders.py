@@ -410,6 +410,25 @@ def edit_order(order_id):
                 sql = 'UPDATE order_items SET ' + ', '.join(updates) + ' WHERE id = %s AND order_id = %s'
                 cursor.execute(sql, params + [order_id])
 
+    # 重新计算订单总额（因 items 变更可能导致价格变化）
+    if items:
+        cursor.execute('''
+            SELECT id, product_type_id, brand_id, model_id, service_type_id, quantity
+            FROM order_items WHERE order_id = %s
+        ''', (order_id,))
+        new_total = 0
+        for ri in cursor.fetchall():
+            price = get_price(conn, ri['product_type_id'], ri['brand_id'], ri['model_id'], ri['service_type_id'])
+            item_total = price * (ri['quantity'] or 1)
+            new_total += item_total
+            cursor.execute('UPDATE order_items SET item_price = %s, final_price = %s WHERE id = %s',
+                          (price, price, ri['id']))
+        # 加上加急费、运费
+        cursor.execute('SELECT COALESCE(urgent_fee, 0) as uf, COALESCE(freight_amount, 0) as fa FROM orders WHERE id = %s', (order_id,))
+        extras = cursor.fetchone()
+        new_total += float(extras['uf'] or 0)
+        cursor.execute('UPDATE orders SET total_amount = %s WHERE id = %s', (new_total, order_id))
+
     # 更新备注
     note = data.get('customer_note')
     if note is not None:

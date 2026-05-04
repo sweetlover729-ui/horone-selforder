@@ -20,8 +20,8 @@ BACKUP_TABLES = [
     'special_services', 'price_overrides',
     'orders', 'order_items', 'tracking_nodes', 'equipment_inspection_data',
     'special_service_records',
-    'customers', 'customer_addresses', 'customer_tokens',
-    'staff', 'staff_tokens',
+    'customers', 'customer_addresses',
+    'staff',
 ]
 
 # 导出时按依赖顺序排列（先导入被依赖的表）
@@ -29,11 +29,37 @@ RESTORE_ORDER = [
     'product_types', 'brands', 'models', 'service_types', 'service_items',
     'special_services', 'price_overrides',
     'staff',
-    'customers', 'customer_addresses', 'customer_tokens',
+    'customers', 'customer_addresses',
     'orders', 'order_items', 'tracking_nodes', 'equipment_inspection_data',
     'special_service_records',
-    'staff_tokens',
 ]
+
+# 恢复白名单：每张表允许的列名（防止 JSON 注入）
+RESTORE_COLUMN_WHITELIST = {
+    'product_types': {'id', 'name', 'categories', 'created_at', 'updated_at'},
+    'brands': {'id', 'name', 'product_type_id', 'surcharge', 'created_at', 'updated_at'},
+    'models': {'id', 'name', 'brand_id', 'category', 'created_at', 'updated_at'},
+    'service_types': {'id', 'name', 'base_price', 'product_type_id', 'category_id', 'created_at', 'updated_at'},
+    'service_items': {'id', 'name', 'description', 'service_type_id', 'product_type_id', 'created_at', 'updated_at'},
+    'special_services': {'id', 'name', 'price', 'description', 'created_at', 'updated_at'},
+    'price_overrides': {'id', 'product_type_id', 'brand_id', 'model_id', 'service_type_id', 'category', 'override_price', 'discount_rate', 'created_at', 'updated_at'},
+    'staff': {'id', 'username', 'full_name', 'password_hash', 'role', 'phone', 'is_active', 'created_at', 'updated_at'},
+    'customers': {'id', 'nickname', 'name', 'phone', 'openid', 'created_at', 'updated_at'},
+    'customer_addresses': {'id', 'customer_id', 'province', 'city', 'district', 'detail', 'contact_name', 'contact_phone', 'is_default', 'created_at', 'updated_at'},
+    'orders': {'id', 'order_no', 'customer_id', 'assigned_staff_id', 'status', 'payment_status', 'total_amount', 'freight_amount', 'urgent_fee', 'urgent_service', 'customer_remark', 'express_company', 'express_no', 'return_express_company', 'return_express_no', 'created_at', 'updated_at', 'completed_at'},
+    'order_items': {'id', 'order_id', 'product_type_id', 'brand_id', 'model_id', 'service_type_id', 'category', 'quantity', 'item_price', 'final_price', 'brand_name_text', 'model_name_text', 'service_name_text', 'customer_note', 'created_at', 'updated_at'},
+    'tracking_nodes': {'id', 'order_id', 'node_code', 'node_name', 'description', 'staff_id', 'staff_name', 'operate_time', 'operate_note', 'photos', 'created_at', 'updated_at'},
+    'equipment_inspection_data': {'id', 'order_id', 'staff_id', 'first_stage_serials', 'first_stage_pre_pressure', 'first_stage_post_pressure', 'second_stage_serials', 'second_stage_pre_resistance', 'second_stage_post_resistance', 'created_at', 'updated_at'},
+    'special_service_records': {'id', 'order_id', 'special_service_id', 'name', 'price', 'quantity', 'description', 'photos', 'created_at', 'updated_at'},
+}
+
+# 恢复时允许的最大字符串长度（防止超大数据攻击）
+RESTORE_MAX_TEXT_LEN = 50000
+
+# 敏感列：备份时替换为占位符
+SENSITIVE_COLUMNS = {
+    'staff': ['password_hash'],
+}
 
 # 需要序列化处理的列（text[] 类型）
 ARRAY_COLUMNS = {
@@ -82,6 +108,12 @@ def export_backup():
                     else:
                         d[k] = v
                 serialized.append(d)
+            # Mask sensitive columns (e.g. password_hash)
+            sensitive_cols = SENSITIVE_COLUMNS.get(table, [])
+            for d in serialized:
+                for sc in sensitive_cols:
+                    if sc in d:
+                        d[sc] = '***REDACTED***'
             backup_data[table] = serialized
         except Exception as e:  # pragma: no cover
             backup_data[table] = {'_error': str(e)}  # pragma: no cover
@@ -139,8 +171,11 @@ def restore_backup():
                 sql.Identifier(table)
             ))
 
-            # 获取列名
-            columns = list(rows[0].keys())
+            # 获取列名，按白名单过滤
+            allowed_cols = RESTORE_COLUMN_WHITELIST.get(table, set())
+            columns = [c for c in rows[0].keys() if c in allowed_cols]
+            if not columns:
+                continue
 
             # 重置序列
             cursor.execute(sql.SQL("""
@@ -159,6 +194,8 @@ def restore_backup():
                     # 数组列需要转回 PostgreSQL 数组格式
                     if col in ARRAY_COLUMNS.get(table, []) and isinstance(val, list):
                         values.append(val)  # psycopg2 自动处理 Python list → text[]  # pragma: no cover
+                    elif isinstance(val, str) and len(val) > RESTORE_MAX_TEXT_LEN:
+                        values.append(val[:RESTORE_MAX_TEXT_LEN])  # 截断超长文本
                     else:
                         values.append(val)
                 try:

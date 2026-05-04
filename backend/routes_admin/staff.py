@@ -139,6 +139,8 @@ def delete_staff(staff_id):
     cursor.execute('UPDATE equipment_inspection_data SET staff_id = NULL WHERE staff_id = %s', (staff_id,))
     # 清理 staff_tokens 关联
     cursor.execute('DELETE FROM staff_tokens WHERE staff_id = %s', (staff_id,))
+    # 清理已分配订单的技师归属
+    cursor.execute('UPDATE orders SET assigned_staff_id = NULL WHERE assigned_staff_id = %s', (staff_id,))
     
     cursor.execute('DELETE FROM staff WHERE id = %s', (staff_id,))
     conn.commit()

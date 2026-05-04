@@ -219,6 +219,14 @@ def get_order_detail(order_id):
     conn = database.get_connection()
     cursor = conn.cursor()
 
+    # 鉴权：非admin只能查看自己接单的订单
+    if staff.get('role') not in ('admin', 'super_admin'):
+        cursor.execute('SELECT assigned_staff_id FROM orders WHERE id = %s', (order_id,))
+        row = cursor.fetchone()
+        if not row or (row['assigned_staff_id'] is not None and row['assigned_staff_id'] != staff['id']):
+            database.release_connection(conn)
+            return jsonify({'success': False, 'message': '无权查看此订单'}), 403
+
     # 获取订单信息
     cursor.execute('''
         SELECT o.*, c.nickname, c.name as customer_name, c.phone as customer_phone
@@ -335,6 +343,7 @@ def update_payment_status(order_id):
     except Exception as e:  # pragma: no cover
         conn.rollback()  # pragma: no cover
         database.release_connection(conn)  # pragma: no cover
-        return jsonify({'success': False, 'message': f'更新失败: {str(e)}'})  # pragma: no cover
+        logger.error('update_payment_status error: %s', str(e))  # pragma: no cover
+        return jsonify({'success': False, 'message': '更新失败，请联系管理员'})  # pragma: no cover
 
 
