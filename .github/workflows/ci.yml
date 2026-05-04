@@ -58,6 +58,17 @@ jobs:
         psql -h localhost -U postgres -d test_selforder -f tests/schema.sql -v ON_ERROR_STOP=1 -q
         psql -h localhost -U postgres -d test_selforder -f tests/seed_test_data.sql -v ON_ERROR_STOP=1 -q
         echo 'Schema + seed created successfully'
+
+    - name: Verify seed data
+      working-directory: backend
+      env:
+        PGPASSWORD: postgres
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_selforder
+      run: |
+        echo '=== Checking staff table ==='
+        psql -h localhost -U postgres -d test_selforder -c "SELECT id, username, role, is_active FROM staff;"
+        echo '=== Row count: staff ==='
+        psql -h localhost -U postgres -d test_selforder -c "SELECT COUNT(*) FROM staff;"
     
     - name: Run tests with coverage
       working-directory: backend
