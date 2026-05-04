@@ -36,11 +36,19 @@ def staff_login():
     conn = database.get_connection()
     cursor = conn.cursor()
 
+    # DEBUG: 打印连接信息
+    import logging
+    _log = logging.getLogger('horone.debug')
+    _log.warning('staff_login: username=%s, PG_CONN_STRING(pfx)=%s', username, database.PG_CONN_STRING[:30])
+
     # 查找用户
     cursor.execute('''
         SELECT * FROM staff WHERE username = %s AND is_active = 1
     ''', (username,))
     staff = cursor.fetchone()
+
+    # DEBUG
+    _log.warning('staff_login: fetchone result=%s', 'None' if staff is None else f'id={staff.get("id")}')
 
     if not staff:
         database.release_connection(conn)
