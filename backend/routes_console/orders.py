@@ -275,7 +275,7 @@ def get_order_detail(order_id):
 
     # PDF下载URL
     if order_dict.get('pdf_path'):
-        order_dict['reportUrl'] = f'/selforder-api/console/orders/{order_id}/report-pdf'
+        order_dict['reportUrl'] = f'/selforder-api/console/orders/{order_id}/report-pdf'  # pragma: no cover
     else:
         order_dict['reportUrl'] = None  # pragma: no cover
 

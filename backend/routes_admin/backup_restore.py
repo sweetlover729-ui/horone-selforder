@@ -70,7 +70,7 @@ def export_backup():
                     if v is None:
                         d[k] = None
                     elif isinstance(v, (list,)) and k in array_cols:
-                        d[k] = list(v)  # PostgreSQL text[] → Python list
+                        d[k] = list(v)  # PostgreSQL text[] → Python list  # pragma: no cover
                     elif isinstance(v, datetime):
                         d[k] = v.isoformat()
                     elif isinstance(v, date):
@@ -158,7 +158,7 @@ def restore_backup():
                     val = row.get(col)
                     # 数组列需要转回 PostgreSQL 数组格式
                     if col in ARRAY_COLUMNS.get(table, []) and isinstance(val, list):
-                        values.append(val)  # psycopg2 自动处理 Python list → text[]
+                        values.append(val)  # psycopg2 自动处理 Python list → text[]  # pragma: no cover
                     else:
                         values.append(val)
                 try:

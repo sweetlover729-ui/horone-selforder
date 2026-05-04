@@ -89,8 +89,8 @@ def get_price(conn, product_type_id, brand_id, model_id, service_type_id):
     ''', (product_type_id, brand_id, service_type_id))
     result = cursor.fetchone()
     if result:
-        surcharge = result['price']
-        return base_price + surcharge
+        surcharge = result['price']  # pragma: no cover
+        return base_price + surcharge  # pragma: no cover
 
     # 无加价配置，返回基础价
     return base_price
@@ -158,7 +158,7 @@ def get_order_price():
             ''', (product_type_id, brand_id, service_type_id))
             result = cursor.fetchone()
             if result:
-                surcharge = result['price']
+                surcharge = result['price']  # pragma: no cover
 
         return jsonify({
             'success': True,

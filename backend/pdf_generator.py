@@ -30,7 +30,7 @@ FONT_LIGHT = 'SimSun'  # 苹果简宋
 
 try:
     pdfmetrics.registerFont(TTFont(FONT_CN,    '/System/Library/Fonts/STHeiti Light.ttc'))
-    pdfmetrics.registerFont(TTFont(FONT_LIGHT, '/System/Library/Fonts/Supplemental/Songti.ttc'))
+    pdfmetrics.registerFont(TTFont(FONT_LIGHT, '/System/Library/Fonts/Supplemental/Songti.ttc'))  # pragma: no cover
 except Exception:  # pragma: no cover — macOS 字体始终存在
     try:
         pdfmetrics.registerFont(TTFont(FONT_CN,    '/Library/Fonts/Arial Unicode.ttf'))

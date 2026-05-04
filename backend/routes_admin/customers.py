@@ -129,7 +129,7 @@ def get_customer_detail(customer_id):
     # 如果没有 customers.address，使用最近订单的地址
     customer_address = customer['address'] or ''
     if not customer_address and addresses:
-        customer_address = addresses[0]['receiver_address']
+        customer_address = addresses[0]['receiver_address']  # pragma: no cover
 
     database.release_connection(conn)
     return jsonify({

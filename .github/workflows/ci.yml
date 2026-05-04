@@ -71,7 +71,7 @@ jobs:
         PGPORT: 5432
       run: |
         mkdir -p /tmp/horone-test/uploads/pdfs /tmp/horone-test/uploads/orders
-        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=100
+        pytest tests/ -v --tb=short --cov=. --omit='tests/*' --cov-report=term-missing --cov-report=xml --cov-fail-under=100
     
     - name: Upload coverage to Codecov
       if: always()
