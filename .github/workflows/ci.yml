@@ -58,17 +58,6 @@ jobs:
         psql -h localhost -U postgres -d test_selforder -f tests/schema.sql -v ON_ERROR_STOP=1 -q
         psql -h localhost -U postgres -d test_selforder -f tests/seed_test_data.sql -v ON_ERROR_STOP=1 -q
         echo 'Schema + seed created successfully'
-
-    - name: Verify seed data
-      working-directory: backend
-      env:
-        PGPASSWORD: postgres
-        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_selforder
-      run: |
-        echo '=== Checking staff table ==='
-        psql -h localhost -U postgres -d test_selforder -c "SELECT id, username, role, is_active FROM staff;"
-        echo '=== Row count: staff ==='
-        psql -h localhost -U postgres -d test_selforder -c "SELECT COUNT(*) FROM staff;"
     
     - name: Run tests with coverage
       working-directory: backend
@@ -83,6 +72,10 @@ jobs:
         PGPORT: 5432
       run: |
         mkdir -p /tmp/horone-test/uploads/pdfs /tmp/horone-test/uploads/orders
+        echo "=== DATABASE_URL check ==="
+        python3 -c "import os; print('DATABASE_URL:', os.environ.get('DATABASE_URL', 'NOT SET'))"
+        python3 -c "import os; os.environ['FLASK_ENV']='testing'; os.environ['HORONE_ROOT']='/tmp/horone-test'; import sys; sys.path.insert(0,'.'); import database; print('PG_CONN_STRING:', database.PG_CONN_STRING)"
+        echo "=== Starting pytest ==="
         pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=100
     
     - name: Upload coverage to Codecov
