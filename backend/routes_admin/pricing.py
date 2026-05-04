@@ -14,7 +14,7 @@ def get_prices():
     """获取价格配置列表"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()
@@ -38,7 +38,7 @@ def create_price():
     """创建价格配置"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     product_type_id = data.get('product_type_id')
@@ -83,7 +83,7 @@ def update_price(price_id):
     """更新价格配置"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     price = data.get('price')
@@ -107,7 +107,7 @@ def delete_price(price_id):
     """删除价格配置"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()

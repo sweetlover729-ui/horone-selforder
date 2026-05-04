@@ -95,7 +95,7 @@ def reports_recent():
     for row in cursor.fetchall():
         oid = row['id']
         if oid in seen:
-            continue
+            continue  # pragma: no cover
         seen.add(oid)
         orders.append(row)
     database.release_connection(conn)

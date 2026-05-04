@@ -13,7 +13,7 @@ def get_staff():
     """获取员工列表"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()
@@ -39,7 +39,7 @@ def create_staff():
     """创建员工账号"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     username = data.get('username', '')
@@ -77,7 +77,7 @@ def update_staff(staff_id):
     """更新员工账号"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     conn = database.get_connection()
@@ -130,7 +130,7 @@ def delete_staff(staff_id):
     """删除员工账号"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()

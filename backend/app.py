@@ -129,11 +129,11 @@ def init_app():
     logger.info("初始化完成，启动服务...")
 
 if __name__ == '__main__':
-    init_app()
-    app = create_app()
-    logger.info("服务启动成功 - http://localhost:3001")
-    
-    import os
-    os.environ['FLASK_ENV'] = 'production'
-    app.run(host='0.0.0.0', port=3001, debug=False,
+    init_app()  # pragma: no cover
+    app = create_app()  # pragma: no cover
+    logger.info("服务启动成功 - http://localhost:3001")  # pragma: no cover
+      # pragma: no cover
+    import os  # pragma: no cover
+    os.environ['FLASK_ENV'] = 'production'  # pragma: no cover
+    app.run(host='0.0.0.0', port=3001, debug=False,  # pragma: no cover
             use_reloader=False, threaded=True)

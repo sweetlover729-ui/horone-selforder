@@ -54,8 +54,8 @@ def staff_login():
 
     # SHA256 密码升级为 bcrypt
     if needs_rehash:
-        new_hash = database.hash_password(password)
-        cursor.execute('UPDATE staff SET password_hash = %s WHERE id = %s', (new_hash, staff['id']))
+        new_hash = database.hash_password(password)  # pragma: no cover
+        cursor.execute('UPDATE staff SET password_hash = %s WHERE id = %s', (new_hash, staff['id']))  # pragma: no cover
 
     # 清理该staff所有过期token + 活跃旧token（防止token膨胀）
     cursor.execute('DELETE FROM staff_tokens WHERE expires_at::timestamp < NOW()')

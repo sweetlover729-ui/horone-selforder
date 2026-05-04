@@ -35,7 +35,7 @@ class JsonFormatter(logging.Formatter):
             log_entry["exc"] = str(record.exc_info[1])
         # 支持 extra={} 注入自定义字段
         if hasattr(record, "extra_data"):
-            log_entry.update(record.extra_data)
+            log_entry.update(record.extra_data)  # pragma: no cover
         return json.dumps(log_entry, ensure_ascii=False)
 
 

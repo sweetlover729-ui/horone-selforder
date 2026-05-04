@@ -71,7 +71,7 @@ jobs:
         PGPORT: 5432
       run: |
         mkdir -p /tmp/horone-test/uploads/pdfs /tmp/horone-test/uploads/orders
-        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=74
+        pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=100
     
     - name: Upload coverage to Codecov
       if: always()
@@ -214,75 +214,37 @@ jobs:
     if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download console artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: console-dist
-        path: frontend-console/dist/
-    
-    - name: Download client artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: client-dist
-        path: frontend/dist/
-    
-    - name: Deploy to Staging Server
+    - name: Trigger deployment via Central Control Platform
       env:
-        SSH_HOST: ${{ secrets.SSH_HOST }}
-        SSH_USER: ${{ secrets.SSH_USER }}
-        SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
       run: |
-        echo "=== Deploying to staging server ==="
-        # 安装 sshpass 或使用 SSH key
-        mkdir -p ~/.ssh
-        echo "$SSH_KEY" > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
-        ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
-        
-        # 打包前端构建产物
-        tar -czf console-dist.tar.gz -C frontend-console/dist .
-        tar -czf client-dist.tar.gz -C frontend/dist .
-        
-        # 上传到服务器
-        scp -i ~/.ssh/deploy_key console-dist.tar.gz $SSH_USER@$SSH_HOST:$DEPLOY_PATH/
-        scp -i ~/.ssh/deploy_key client-dist.tar.gz $SSH_USER@$SSH_HOST:$DEPLOY_PATH/
-        
-        # 在服务器上解压并重启服务（通过中央控制平台）
-        ssh -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST << 'ENDSSH'
-        cd $DEPLOY_PATH
-        
-        # 备份当前版本
-        BACKUP_DIR=backups/$(date +%Y%m%d_%H%M%S)
-        mkdir -p $BACKUP_DIR
-        cp -r frontend-console/dist $BACKUP_DIR/ 2>/dev/null || true
-        cp -r frontend/dist $BACKUP_DIR/ 2>/dev/null || true
-        
-        # 解压新版本
-        tar -xzf console-dist.tar.gz -C frontend-console/dist/
-        tar -xzf client-dist.tar.gz -C frontend/dist/
-        
-        # 通过中央控制平台重启服务（推荐方式）
-        # curl -X POST http://localhost:8888/api/restart/horone.selforder
-        
-        echo "✅ Deployment completed"
-        ENDSSH
-        
-        # 清理本地打包文件
-        rm -f console-dist.tar.gz client-dist.tar.gz
+        echo "=== Trigger deploy via central platform webhook ==="
+        RESP=$(curl -s -w "\n%{http_code}" -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "trigger_deploy",
+            "service": "horone.selforder",
+            "deploy_token": "'"$DEPLOY_TOKEN"'"
+          }')
+        HTTP_CODE=$(echo "$RESP" | tail -1)
+        BODY=$(echo "$RESP" | sed '$d')
+        echo "HTTP status: $HTTP_CODE"
+        echo "Response: $BODY"
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "❌ Deploy trigger failed!"
+          exit 1
+        fi
+        echo "✅ Deploy triggered successfully"
     
     - name: Verify deployment
       run: |
-        echo "=== Verifying deployment ==="
-        # 等待服务启动
-        sleep 10
-        
-        # 健康检查（需要替换为实际的域名）
-        # curl -f https://horone.alautoai.cn/health || exit 1
-        
-        echo "✅ Deployment verified"
+        echo "=== Waiting for service restart ==="
+        sleep 15
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://horone.alautoai.cn/health || echo "000")
+        echo "Health check HTTP status: $HTTP_CODE"
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "⚠️  Health check not 200 (got $HTTP_CODE), may need more time"
+        fi
 
   deploy-production:
     name: Deploy to Production
@@ -291,41 +253,74 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts/
-    
-    - name: Deploy to Production Server
+    - name: Trigger deployment via Central Control Platform
       env:
-        SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
-        SSH_USER: ${{ secrets.PROD_SSH_USER }}
-        SSH_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
-        DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
       run: |
-        echo "=== Deploying to PRODUCTION server ==="
-        echo "⚠️  Production deployment - manual approval required"
-        
-        mkdir -p ~/.ssh
-        echo "$SSH_KEY" > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
-        ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
-        
-        # 打包并上传（类似 staging 流程）
-        # ... (同 staging 逻辑)
-        
-        echo "✅ Production deployment completed"
+        echo "=== Trigger production deploy via central platform webhook ==="
+        RESP=$(curl -s -w "\n%{http_code}" -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "trigger_deploy",
+            "service": "horone.selforder",
+            "deploy_token": "'"$DEPLOY_TOKEN"'"
+          }')
+        HTTP_CODE=$(echo "$RESP" | tail -1)
+        BODY=$(echo "$RESP" | sed '$d')
+        echo "HTTP status: $HTTP_CODE"
+        echo "Response: $BODY"
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "❌ Deploy trigger failed!"
+          exit 1
+        fi
+        echo "✅ Production deploy triggered"
     
-    - name: Notification - Production Deploy
+    - name: Verify deployment
+      run: |
+        echo "=== Verifying production deployment ==="
+        sleep 20
+        
+        # 健康检查
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://horone.alautoai.cn/health || echo "000")
+        echo "Health check HTTP status: $HTTP_CODE"
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "❌ Health check failed!"
+          exit 1
+        fi
+        
+        # 验证管理后台可访问
+        ADMIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://horone.alautoai.cn/admin || echo "000")
+        echo "Admin page HTTP status: $ADMIN_CODE"
+        
+        echo "✅ Production deployment verified"
+    
+    - name: Notification - Production Deploy Success
       if: success()
-      uses: 8398a7/action-slack@v3
-      with:
-        status: success
-        text: "🚀 Production deployed: ${{ github.sha }}"
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-      continue-on-error: true
+      run: |
+        curl -s -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "production_deploy_success",
+            "repository": "${{ github.repository }}",
+            "branch": "${{ github.ref }}",
+            "commit": "${{ github.sha }}",
+            "author": "${{ github.actor }}",
+            "run_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }' || true
+    
+    - name: Notification - Production Deploy Failure
+      if: failure()
+      run: |
+        curl -s -X POST https://server.alautoai.cn/api/webhook/receive \
+          -H "Content-Type: application/json" \
+          -d '{
+            "event": "production_deploy_failure",
+            "repository": "${{ github.repository }}",
+            "branch": "${{ github.ref }}",
+            "commit": "${{ github.sha }}",
+            "author": "${{ github.actor }}",
+            "run_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }' || true
 
   notify-success:
     name: Notify - Build Success

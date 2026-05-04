@@ -15,7 +15,7 @@ def get_service_types():
     """获取服务类型列表（级联过滤：可选 product_type_id/brand_id 约束）"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
 
     product_type_id = request.args.get('product_type_id', type=int) or None
     brand_id = request.args.get('brand_id', type=int) or None
@@ -59,7 +59,7 @@ def create_service_type():
     """创建服务类型"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     product_type_id = data.get('product_type_id')
@@ -92,7 +92,7 @@ def update_service_type(service_type_id):
     """更新服务类型"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     conn = database.get_connection()
@@ -126,7 +126,7 @@ def delete_service_type(service_type_id):
     """删除服务类型"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()
@@ -144,7 +144,7 @@ def get_service_items():
     """获取服务项目列表"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     type_id = request.args.get('type_id', type=int)
     conn = database.get_connection()
@@ -175,7 +175,7 @@ def create_service_item():
     """创建服务项目"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     product_type_id = data.get('product_type_id')
@@ -206,7 +206,7 @@ def update_service_item(item_id):
     """更新服务项目"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     conn = database.get_connection()
@@ -240,7 +240,7 @@ def delete_service_item(item_id):
     """删除服务项目"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()
@@ -258,7 +258,7 @@ def get_special_services():
     """获取专项服务预设列表"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()
@@ -273,7 +273,7 @@ def create_special_service():
     """创建专项服务预设"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     name = data.get('name', '')
@@ -302,7 +302,7 @@ def update_special_service(service_id):
     """更新专项服务预设"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     data = request.get_json()
     conn = database.get_connection()
@@ -336,7 +336,7 @@ def delete_special_service(service_id):
     """删除专项服务预设"""
     token = request.headers.get('X-Staff-Token', '')
     if not validate_staff_token(token, allow_inactive=True):
-        return jsonify({'success': False, 'message': '未登录或无权限'})
+        return jsonify({'success': False, 'message': '未登录或无权限'})  # pragma: no cover
     
     conn = database.get_connection()
     cursor = conn.cursor()

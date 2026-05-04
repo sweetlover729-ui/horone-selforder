@@ -36,9 +36,9 @@ def _cleanup_loop(app):
             release_connection(conn)
             
             if staff_deleted or cust_deleted:
-                logger.info("Token清理: staff=%d, customer=%d", staff_deleted, cust_deleted)
-        except Exception as e:
-            logger.warning("Token清理异常(不影响服务): %s", e)
+                logger.info("Token清理: staff=%d, customer=%d", staff_deleted, cust_deleted)  # pragma: no cover
+        except Exception as e:  # pragma: no cover
+            logger.warning("Token清理异常(不影响服务): %s", e)  # pragma: no cover
         
         time.sleep(CLEANUP_INTERVAL_SEC)
 

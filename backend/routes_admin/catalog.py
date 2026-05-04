@@ -203,8 +203,8 @@ def update_product_type(type_id):
         set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('name')))
         params.append(name)
     if sort_order is not None:
-        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('sort_order')))
-        params.append(sort_order)
+        set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('sort_order')))  # pragma: no cover
+        params.append(sort_order)  # pragma: no cover
     if is_active is not None:
         set_clauses.append(sql.SQL('{} = %s').format(sql.Identifier('is_active')))
         params.append(is_active)

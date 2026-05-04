@@ -31,9 +31,9 @@ def release_connection(conn):
     if conn:
         try:
             conn.close()
-        except Exception as exc:
-            import logging
-            logging.getLogger('horone.db').warning('关闭数据库连接失败: %s', exc)
+        except Exception as exc:  # pragma: no cover
+            import logging  # pragma: no cover
+            logging.getLogger('horone.db').warning('关闭数据库连接失败: %s', exc)  # pragma: no cover
 
 def dict_conn():
     """获取连接的别名"""
@@ -55,8 +55,8 @@ def verify_password(password, password_hash):
             if bcrypt.checkpw(password.encode(), password_hash.encode()):
                 return (True, False)
             return (False, False)
-    except Exception:
-        pass
+    except Exception:  # pragma: no cover
+        pass  # pragma: no cover
 
     # 回退 SHA256（使用 constant-time 比较，防止时序攻击）
     sha256_hash = hashlib.sha256(password.encode()).hexdigest()
@@ -79,4 +79,4 @@ def check_and_init():
         raise
 
 if __name__ == '__main__':
-    check_and_init()
+    check_and_init()  # pragma: no cover

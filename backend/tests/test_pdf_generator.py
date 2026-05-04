@@ -9,8 +9,9 @@ from datetime import datetime
 
 import pdf_generator as pg
 from pdf_generator import (_build_styles, _t, _make_table, _photo_cell,
-                           _photo_path, _page_template, ensure_pdf_dir,
-                           DiagonalWatermark, generate_order_pdf,
+                           _photo_path, _page_template, _fmt_time,
+                           ensure_pdf_dir, DiagonalWatermark,
+                           generate_order_pdf,
                            cleanup_expired_pdfs, cleanup_order_photos)
 
 
@@ -447,36 +448,7 @@ class TestPdfFinalGap:
 
     def test_fmt_time_exotic_format(self):
         """_fmt_time 异型日期格式 → 236-252"""
-        # 直接调用内部 _fmt_time 函数
-        import re
-        from datetime import datetime as _dt
-
-        def _fmt_time(v):
-            if not v:
-                return ''
-            s = str(v)
-            s = re.sub(r'\.[0-9]+', '', s)
-            s = re.sub(r'\s+[A-Z]{2,4}$', '', s)
-            s = re.sub(r'\+[0-9]{2}:[0-9]{2}$', '', s)
-            s = s.strip()
-            if re.match(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$', s):
-                return s
-            m = re.search(r'\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}', s)
-            if m:
-                try:
-                    parsed = _dt.strptime(m.group(0), '%d %b %Y %H:%M:%S')
-                    return parsed.strftime('%Y-%m-%d %H:%M:%S')
-                except Exception:
-                    pass
-            m = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s*([+-]\d{2}:\d{2})?', s)
-            if m:
-                return m.group(1) + ' ' + m.group(2)
-            m = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})', s)
-            if m:
-                return m.group(1) + ' ' + m.group(2)
-            return s
-
-        # 测试异型日期格式
+        # 调用真实的生产代码 _fmt_time
         result = _fmt_time('27 Apr 2026 16:56:35')
         assert result == '2026-04-27 16:56:35'
 
@@ -489,6 +461,13 @@ class TestPdfFinalGap:
         # 兜底路径
         result4 = _fmt_time('some random text')
         assert result4 == 'some random text'
+
+        # 空值
+        assert _fmt_time(None) == ''
+        assert _fmt_time('') == ''
+
+        # 标准格式直通
+        assert _fmt_time('2026-04-27 16:56:35') == '2026-04-27 16:56:35'
 
     def test_process_page_corrupted_photos_json(self, db_conn):
         """tracking_nodes 的 photos 字段非合法 JSON → 555"""
