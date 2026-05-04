@@ -331,6 +331,7 @@ def client_get_node_photo(order_id, node_id, filename):
     if not order or order['customer_id'] != customer['id']:
         return jsonify({'success': False, 'message': '无权访问'}), 403
 
+    filename = os.path.basename(filename)  # 防路径遍历
     filepath = f'{database.ORDER_UPLOAD_DIR}/{order_id}/nodes/{node_id}/{filename}'
     if not os.path.exists(filepath):
         return jsonify({'success': False, 'message': '照片不存在'}), 404

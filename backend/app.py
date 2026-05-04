@@ -30,13 +30,14 @@ logger = get_logger('app')
 app = Flask(__name__)
 
 # 配置CORS - 白名单
+# 生产环境仅允许正式域名；调试时设置 HORONE_CORS_EXTRA 环境变量
 CORS_ORIGINS = [
     'https://horone.alautoai.cn',
     'https://www.horone.alautoai.cn',
-    'http://192.168.3.24:3001',   # 内网调试
-    'http://localhost:5173',       # Vite dev server
-    'http://localhost:3000',       # 本地前端
 ]
+_extra = os.environ.get('HORONE_CORS_EXTRA', '')
+if _extra:
+    CORS_ORIGINS.extend(o.strip() for o in _extra.split(',') if o.strip())
 CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}})
 
 # REST API 使用 Token 认证，无 Cookie-based session，无需 CSRF 保护

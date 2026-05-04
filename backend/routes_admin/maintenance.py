@@ -2,6 +2,7 @@
 """保养提醒管理 (maintenance-reminders CRUD + stats)"""
 from . import admin_bp
 from auth import admin_required, validate_staff_token
+from psycopg2 import sql
 import database
 from flask import request, jsonify
 
@@ -29,29 +30,35 @@ def list_maintenance_reminders():
     page_size = int(request.args.get('pageSize', 20))
     offset = (page - 1) * page_size
 
-    conditions = []
+    where_parts = []
     params = []
     if status_filter:
-        conditions.append('mr.status = %s')
+        where_parts.append(sql.SQL('mr.status = %s'))
         params.append(status_filter)
     if customer_id:
-        conditions.append('mr.customer_id = %s')
+        where_parts.append(sql.SQL('mr.customer_id = %s'))
         params.append(int(customer_id))
-    where_clause = ' AND '.join(conditions) if conditions else 'TRUE'
+    where_sql = sql.SQL(' AND ').join(where_parts) if where_parts else sql.SQL('TRUE')
 
-    cursor.execute(f'''
+    cursor.execute(
+        sql.SQL('''
         SELECT mr.*, c.name as customer_name, c.phone as customer_phone,
                o.order_no
         FROM maintenance_reminders mr
         LEFT JOIN customers c ON c.id = mr.customer_id
         LEFT JOIN orders o ON o.id = mr.order_id
-        WHERE {where_clause}
+        WHERE {where}
         ORDER BY mr.next_service_date ASC
         LIMIT %s OFFSET %s
-    ''', params + [page_size, offset])
+    ''').format(where=where_sql),
+        params + [page_size, offset]
+    )
     reminders = [dict(r) for r in cursor.fetchall()]
 
-    cursor.execute(f'SELECT COUNT(*) FROM maintenance_reminders mr WHERE {where_clause}', params)
+    cursor.execute(
+        sql.SQL('SELECT COUNT(*) FROM maintenance_reminders mr WHERE {where}').format(where=where_sql),
+        params
+    )
     total = cursor.fetchone()['count']
 
     database.release_connection(conn)

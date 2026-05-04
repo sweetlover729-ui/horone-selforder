@@ -6,6 +6,9 @@ import database
 from psycopg2 import sql
 from flask import request, jsonify, Response as FlaskResponse
 from datetime import datetime, date
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 from decimal import Decimal
 import uuid
 import json as _json
@@ -282,8 +285,8 @@ def archive_cleanup():
         if os.path.exists(photos_dir):
             try:  # pragma: no cover
                 shutil.rmtree(photos_dir)  # pragma: no cover
-            except OSError:  # pragma: no cover
-                pass  # pragma: no cover
+            except OSError as exc:  # pragma: no cover
+                logger.error('archive cleanup rmtree failed for order %s: %s', order_id, exc)  # pragma: no cover
 
         # 标记为已归档
         cursor.execute('UPDATE orders SET archived = 1, updated_at = NOW() WHERE id = %s', (order_id,))

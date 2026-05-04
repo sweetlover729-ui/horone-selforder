@@ -371,6 +371,7 @@ def get_node_photo(order_id, node_id, filename):
 
     # 数据库存储路径: orders/{order_id}/nodes/{node_id}/{filename}
     # 相对于 UPLOAD_DIR，所以完整路径是 UPLOAD_DIR + 数据库存储路径
+    filename = os.path.basename(filename)  # 防路径遍历
     filepath = f'{database.UPLOAD_DIR}/orders/{order_id}/nodes/{node_id}/{filename}'
     if not os.path.exists(filepath):
         return jsonify({'success': False, 'message': '照片不存在'}), 404
