@@ -52,7 +52,12 @@ def verify_password(password, password_hash):
     # 先尝试 bcrypt
     try:
         if password_hash.startswith('$2b$') or password_hash.startswith('$2a$'):
-            if bcrypt.checkpw(password.encode(), password_hash.encode()):
+            _pw_bytes = password.encode()
+            _hash_bytes = password_hash.encode()
+            _result = bcrypt.checkpw(_pw_bytes, _hash_bytes)
+            logger.warning('verify_password: hash[0:30]=%s hash_len=%d bcrypt_result=%s',
+                          password_hash[:30], len(password_hash), _result)
+            if _result:
                 return (True, False)
             return (False, False)
     except Exception:  # pragma: no cover
