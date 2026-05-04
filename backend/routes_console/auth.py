@@ -55,7 +55,10 @@ def staff_login():
         return jsonify({'success': False, 'message': '用户名或密码错误'})
 
     # 验证密码（支持 bcrypt + SHA256 双验证）
+    # DEBUG
+    _log.warning('staff_login: about to verify password, hash_pfx=%s', staff['password_hash'][:10])
     is_valid, needs_rehash = database.verify_password(password, staff['password_hash'])
+    _log.warning('staff_login: verify result is_valid=%s needs_rehash=%s', is_valid, needs_rehash)
     if not is_valid:
         database.release_connection(conn)
         return jsonify({'success': False, 'message': '用户名或密码错误'})
